@@ -1,5 +1,9 @@
 package atri.palaash.lumenforge.ui;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+
 import javax.swing.BorderFactory;
 import javax.swing.DefaultListModel;
 import javax.swing.JButton;
@@ -10,10 +14,18 @@ import javax.swing.JScrollPane;
 import javax.swing.JTextField;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 public class PromptLibraryPanel extends JPanel {
+
+    private static final Path PERSIST_PATH = Path.of(
+            System.getProperty("user.home"), ".lumenforge-models", "library.json");
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .enable(SerializationFeature.INDENT_OUTPUT);
 
     private final DefaultListModel<PromptPreset> listModel = new DefaultListModel<>();
     private final JList<PromptPreset> list = new JList<>(listModel);
@@ -50,6 +62,8 @@ public class PromptLibraryPanel extends JPanel {
                 onApply.onApply(preset);
             }
         });
+
+        loadFromDisk();
     }
 
     public interface ApplyListener {
@@ -65,6 +79,7 @@ public class PromptLibraryPanel extends JPanel {
     public void addPreset(PromptPreset preset) {
         allPresets.add(0, preset);
         applyFilter();
+        saveToDisk();
     }
 
     private void applyFilter() {
@@ -85,5 +100,43 @@ public class PromptLibraryPanel extends JPanel {
         }
         allPresets.remove(selected);
         applyFilter();
+        saveToDisk();
+    }
+
+    /* ---- persistence ---- */
+
+    private void saveToDisk() {
+        try {
+            Files.createDirectories(PERSIST_PATH.getParent());
+            List<Map<String, String>> list = new ArrayList<>();
+            for (PromptPreset p : allPresets) {
+                list.add(Map.of(
+                        "name", p.name(),
+                        "prompt", p.prompt(),
+                        "negativePrompt", p.negativePrompt(),
+                        "tags", p.tags(),
+                        "style", p.style()
+                ));
+            }
+            MAPPER.writeValue(PERSIST_PATH.toFile(), list);
+        } catch (Exception ignored) { }
+    }
+
+    private void loadFromDisk() {
+        try {
+            if (!Files.exists(PERSIST_PATH)) { return; }
+            List<Map<String, String>> list = MAPPER.readValue(
+                    PERSIST_PATH.toFile(), new TypeReference<>() {});
+            for (Map<String, String> m : list) {
+                allPresets.add(new PromptPreset(
+                        m.getOrDefault("name", ""),
+                        m.getOrDefault("prompt", ""),
+                        m.getOrDefault("negativePrompt", ""),
+                        m.getOrDefault("tags", ""),
+                        m.getOrDefault("style", "")
+                ));
+            }
+            applyFilter();
+        } catch (Exception ignored) { }
     }
 }

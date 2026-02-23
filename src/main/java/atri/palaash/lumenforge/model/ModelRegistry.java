@@ -55,6 +55,18 @@ public class ModelRegistry {
             "text-image/stable-diffusion-v15/unet/model.onnx",
             "https://huggingface.co/onnx-community/stable-diffusion-v1-5-ONNX/resolve/main/unet/model.onnx",
             "Auto-downloads UNet ONNX from onnx-community/stable-diffusion-v1-5-ONNX."));
+        textToImage.add(new ModelDescriptor("sd_turbo_onnx", "SD Turbo ONNX (1\u20134 steps)", TaskType.TEXT_TO_IMAGE,
+            "text-image/sd-turbo/unet/model.onnx",
+            "https://huggingface.co/onnxruntime/sd-turbo/resolve/main/unet/model.onnx",
+            "Distilled SD Turbo model. Generates images in 1\u20134 steps. Auto-downloads from onnxruntime/sd-turbo."));
+        textToImage.add(new ModelDescriptor("sdxl_turbo_onnx", "SDXL Turbo ONNX (1\u20134 steps, 512\u00d7512)", TaskType.TEXT_TO_IMAGE,
+            "text-image/sdxl-turbo/unet/model.onnx",
+            "https://huggingface.co/onnxruntime/sdxl-turbo/resolve/main/unet/model.onnx",
+            "SDXL Turbo with dual text encoders. 1\u20134 steps, 512\u00d7512. Warning: ~10 GB download."));
+        textToImage.add(new ModelDescriptor("sd_pytorch", "SD v1.5 PyTorch (DJL)", TaskType.TEXT_TO_IMAGE,
+            "text-image/sd-pytorch/unet_model.pt",
+            "",
+            "Stable Diffusion v1.5 via DJL/PyTorch. Requires TorchScript export (see scripts/export_torchscript.py). Build with -Ddjl=true."));
 
         List<ModelDescriptor> imageUpscale = new ArrayList<>();
         imageUpscale.add(new ModelDescriptor("realesrgan", "Real-ESRGAN ONNX", TaskType.IMAGE_UPSCALE,
@@ -64,6 +76,17 @@ public class ModelRegistry {
 
         byTask.put(TaskType.TEXT_TO_IMAGE, textToImage);
         byTask.put(TaskType.IMAGE_UPSCALE, imageUpscale);
+
+        List<ModelDescriptor> img2img = new ArrayList<>();
+        img2img.add(new ModelDescriptor("sd_v15_img2img", "SD v1.5 Img2Img ONNX", TaskType.IMAGE_TO_IMAGE,
+            "text-image/stable-diffusion-v15/unet/model.onnx",
+            "https://huggingface.co/onnx-community/stable-diffusion-v1-5-ONNX/resolve/main/unet/model.onnx",
+            "Image-to-Image with SD v1.5. Reuses the same ONNX bundle (requires VAE encoder). Supports inpainting masks."));
+        img2img.add(new ModelDescriptor("sd_turbo_img2img", "SD Turbo Img2Img ONNX", TaskType.IMAGE_TO_IMAGE,
+            "text-image/sd-turbo/unet/model.onnx",
+            "https://huggingface.co/onnxruntime/sd-turbo/resolve/main/unet/model.onnx",
+            "Image-to-Image with SD Turbo. 1\u20134 steps, fast iteration."));
+        byTask.put(TaskType.IMAGE_TO_IMAGE, img2img);
 
         downloadableAssets.add(new ModelDescriptor("sd_turbo_unet", "SD Turbo UNet ONNX (Experimental)", TaskType.TEXT_TO_IMAGE,
             "text-image/sd-turbo/unet/model.onnx",

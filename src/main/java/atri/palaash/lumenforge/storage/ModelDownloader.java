@@ -121,32 +121,73 @@ public class ModelDownloader {
     private void downloadKnownBundleFiles(ModelDescriptor descriptor,
                                           Consumer<DownloadProgress> progressConsumer,
                                           List<Path> writtenFiles) throws IOException, InterruptedException {
-        if (!"sd_v15_onnx".equals(descriptor.id())) {
-            return;
+        if ("sd_v15_onnx".equals(descriptor.id())) {
+            downloadSdBundle(descriptor, "text-image/stable-diffusion-v15",
+                    List.of(
+                            "unet/model.onnx", "unet/weights.pb",
+                            "text_encoder/model.onnx",
+                            "vae_decoder/model.onnx",
+                            "scheduler/scheduler_config.json",
+                            "tokenizer/merges.txt", "tokenizer/special_tokens_map.json",
+                            "tokenizer/tokenizer_config.json", "tokenizer/vocab.json"
+                    ), progressConsumer, writtenFiles);
+        } else if ("sd_turbo_onnx".equals(descriptor.id())) {
+            downloadSdBundle(descriptor, "text-image/sd-turbo",
+                    List.of(
+                            "unet/model.onnx",
+                            "text_encoder/model.onnx",
+                            "vae_decoder/model.onnx",
+                            "tokenizer/merges.txt", "tokenizer/special_tokens_map.json",
+                            "tokenizer/tokenizer_config.json", "tokenizer/vocab.json"
+                    ), progressConsumer, writtenFiles);
+        } else if ("sdxl_turbo_onnx".equals(descriptor.id())) {
+            downloadSdBundle(descriptor, "text-image/sdxl-turbo",
+                    List.of(
+                            "unet/model.onnx", "unet/weights.pb",
+                            "text_encoder/model.onnx",
+                            "text_encoder_2/model.onnx", "text_encoder_2/weights.pb",
+                            "vae_decoder/model.onnx", "vae_decoder/weights.pb",
+                            "scheduler/scheduler_config.json",
+                            "tokenizer/merges.txt", "tokenizer/vocab.json",
+                            "tokenizer_2/merges.txt", "tokenizer_2/vocab.json"
+                    ), progressConsumer, writtenFiles);
+        } else if ("sd_v15_img2img".equals(descriptor.id())) {
+            // Img2Img reuses the SD v1.5 bundle + VAE encoder
+            downloadSdBundle(descriptor, "text-image/stable-diffusion-v15",
+                    List.of(
+                            "unet/model.onnx", "unet/weights.pb",
+                            "text_encoder/model.onnx",
+                            "vae_decoder/model.onnx",
+                            "vae_encoder/model.onnx",
+                            "scheduler/scheduler_config.json",
+                            "tokenizer/merges.txt", "tokenizer/special_tokens_map.json",
+                            "tokenizer/tokenizer_config.json", "tokenizer/vocab.json"
+                    ), progressConsumer, writtenFiles);
+        } else if ("sd_turbo_img2img".equals(descriptor.id())) {
+            // SD Turbo img2img — reuses SD Turbo bundle + VAE encoder from v1.5
+            downloadSdBundle(descriptor, "text-image/sd-turbo",
+                    List.of(
+                            "unet/model.onnx",
+                            "text_encoder/model.onnx",
+                            "vae_decoder/model.onnx",
+                            "tokenizer/merges.txt", "tokenizer/special_tokens_map.json",
+                            "tokenizer/tokenizer_config.json", "tokenizer/vocab.json"
+                    ), progressConsumer, writtenFiles);
         }
+    }
+
+    private void downloadSdBundle(ModelDescriptor descriptor, String localDir,
+                                  List<String> files,
+                                  Consumer<DownloadProgress> progressConsumer,
+                                  List<Path> writtenFiles) throws IOException, InterruptedException {
         HfResolvePath hfPath = parseHuggingFaceResolvePath(descriptor.sourceUrl());
-        if (hfPath == null) {
-            return;
-        }
+        if (hfPath == null) { return; }
         String repo = hfPath.repoId();
         String revision = hfPath.revision();
-        List<String> files = List.of(
-                "unet/model.onnx",
-                "unet/weights.pb",
-                "text_encoder/model.onnx",
-                "vae_decoder/model.onnx",
-                "scheduler/scheduler_config.json",
-                "tokenizer/merges.txt",
-                "tokenizer/special_tokens_map.json",
-                "tokenizer/tokenizer_config.json",
-                "tokenizer/vocab.json"
-        );
         for (String relative : files) {
-            Path target = storage.root().resolve("text-image/stable-diffusion-v15").resolve(relative);
+            Path target = storage.root().resolve(localDir).resolve(relative);
             Files.createDirectories(target.getParent());
-            if (Files.exists(target) && Files.size(target) > 0) {
-                continue;
-            }
+            if (Files.exists(target) && Files.size(target) > 0) { continue; }
             String url = "https://huggingface.co/" + repo + "/resolve/" + revision + "/" + relative;
             downloadUrlToPath(url, target, progressConsumer);
             writtenFiles.add(target);

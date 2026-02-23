@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -82,6 +81,24 @@ public class GenericOnnxService implements InferenceService {
                 }
                 if ("sd_v15_onnx".equals(request.model().id())) {
                     return runStableDiffusionV15(environment, sessionOptions, request, providerSelection.provider());
+                }
+                if ("sd_turbo_onnx".equals(request.model().id())) {
+                    return runStableDiffusionTurbo(environment, sessionOptions, request, providerSelection.provider());
+                }
+                if ("sdxl_turbo_onnx".equals(request.model().id())) {
+                    return runSdxlTurbo(environment, sessionOptions, request, providerSelection.provider());
+                }
+                // DJL/PyTorch models — delegate to the DJL backend
+                if (request.model().id().contains("pytorch")) {
+                    DjlPyTorchService djl = new DjlPyTorchService(storage, executor);
+                    return djl.run(request).join();
+                }
+                // Img2Img pipelines
+                if ("sd_v15_img2img".equals(request.model().id())) {
+                    return runImg2Img(environment, sessionOptions, request, providerSelection.provider(), false);
+                }
+                if ("sd_turbo_img2img".equals(request.model().id())) {
+                    return runImg2Img(environment, sessionOptions, request, providerSelection.provider(), true);
                 }
 
                 String details = "Model loaded but generation is not implemented for this ONNX pipeline: "
@@ -200,6 +217,10 @@ public class GenericOnnxService implements InferenceService {
                             : etaSec + "s";
                     request.reportProgress("Denoising: " + (stepIndex + 1) + "/" + steps
                             + " steps (" + String.format("%.1f", elapsed / 1000.0) + "s/step, ETA: " + eta + ")");
+
+                    if (request.isCancelled()) {
+                        return InferenceResult.fail("Cancelled by user.");
+                    }
                 }
 
                 request.reportProgress("Decoding latents with VAE\u2026");
@@ -228,6 +249,700 @@ public class GenericOnnxService implements InferenceService {
         } catch (Exception ex) {
             return InferenceResult.fail("Stable Diffusion v1.5 pipeline failed: " + ex.getMessage());
         }
+    }
+
+    /* ================================================================== */
+    /*  SD Turbo — distilled 1–4 step pipeline (no classifier-free        */
+    /*  guidance, uses Euler-based single-step scheduler).                 */
+    /* ================================================================== */
+
+    private InferenceResult runStableDiffusionTurbo(OrtEnvironment environment,
+                                                    OrtSession.SessionOptions sessionOptions,
+                                                    InferenceRequest request,
+                                                    String provider) {
+        try {
+            int width  = Math.max(256, (request.width()  / 8) * 8);
+            int height = Math.max(256, (request.height() / 8) * 8);
+            int latentWidth  = width  / 8;
+            int latentHeight = height / 8;
+            int steps = Math.max(1, Math.min(request.batch() > 0 ? request.batch() : 4, 8));
+
+            Path base = storage.root().resolve("text-image").resolve("sd-turbo");
+            Path textEncoderPath = base.resolve("text_encoder/model.onnx");
+            Path unetPath        = base.resolve("unet/model.onnx");
+            Path vaeDecoderPath  = base.resolve("vae_decoder/model.onnx");
+
+            // SD Turbo shares the same vocabulary as SD 1.x — reuse from SD v1.5 if present,
+            // otherwise look for them inside the sd-turbo directory.
+            Path vocabPath   = resolveTokenizerFile(base, "tokenizer/vocab.json");
+            Path mergesPath  = resolveTokenizerFile(base, "tokenizer/merges.txt");
+
+            for (Path p : List.of(textEncoderPath, unetPath, vaeDecoderPath, vocabPath, mergesPath)) {
+                if (!java.nio.file.Files.exists(p)) {
+                    return InferenceResult.fail("SD Turbo bundle is incomplete (missing " + p.getFileName()
+                            + "). Open Models → Model Manager and download all SD Turbo components. "
+                            + "Tokenizer files also need to be present.");
+                }
+            }
+
+            ClipTokenizer tokenizer = ClipTokenizer.load(vocabPath, mergesPath);
+            long[] promptTokens = tokenizer.encode(request.prompt(), 77);
+
+            request.reportProgress("Loading SD Turbo models (text encoder, UNet, VAE decoder)\u2026");
+            try (OrtSession textEncoder = environment.createSession(textEncoderPath.toString(), sessionOptions);
+                 OrtSession unet        = environment.createSession(unetPath.toString(), sessionOptions);
+                 OrtSession vaeDecoder   = environment.createSession(vaeDecoderPath.toString(), sessionOptions)) {
+
+                request.reportProgress("Encoding text prompt\u2026");
+                float[][][] textEmbeddings = runTextEncoder(environment, textEncoder, promptTokens);
+
+                // SD Turbo does NOT use classifier-free guidance — single batch only.
+                float[][][][] latents = randomLatents(request.seed(), latentHeight, latentWidth);
+
+                // Euler-style timestep schedule for turbo distillation.
+                int[] timesteps = turboTimesteps(steps);
+
+                request.reportProgress("Denoising: 0/" + steps + " steps (SD Turbo) — EP: " + provider);
+                long stepStart = System.currentTimeMillis();
+                for (int i = 0; i < timesteps.length; i++) {
+                    int t = timesteps[i];
+
+                    OnnxTensor sampleTensor   = OnnxTensor.createTensor(environment, latents);
+                    OnnxTensor timestepTensor  = createTimestepTensor(environment, unet, t);
+                    OnnxTensor hiddenTensor    = OnnxTensor.createTensor(environment, textEmbeddings);
+                    Map<String, OnnxTensor> unetInputs = new HashMap<>();
+                    unetInputs.put(resolveInputName(unet, "sample", 0), sampleTensor);
+                    unetInputs.put(resolveInputName(unet, "timestep", 1), timestepTensor);
+                    unetInputs.put(resolveInputName(unet, "encoder_hidden_states", 2), hiddenTensor);
+
+                    float[][][][] noise;
+                    try (OrtSession.Result unetResult = unet.run(unetInputs)) {
+                        noise = extractTensor4d(unetResult);
+                    } finally {
+                        sampleTensor.close();
+                        timestepTensor.close();
+                        hiddenTensor.close();
+                    }
+
+                    if (noise == null || noise.length == 0) {
+                        return InferenceResult.fail("SD Turbo UNet produced invalid output.");
+                    }
+
+                    // Euler step: x_{t-1} = x_t - sigma * noise_pred
+                    float sigma = turboSigma(t);
+                    float sigmaPrev = (i + 1 < timesteps.length) ? turboSigma(timesteps[i + 1]) : 0f;
+                    latents = eulerStep(latents, noise[0], sigma, sigmaPrev);
+
+                    long elapsed = System.currentTimeMillis() - stepStart;
+                    stepStart = System.currentTimeMillis();
+                    int remaining = steps - (i + 1);
+                    long eta = remaining * elapsed / 1000;
+                    request.reportProgress("Denoising: " + (i + 1) + "/" + steps
+                            + " steps (" + String.format("%.1f", elapsed / 1000.0) + "s/step, ETA: " + eta + "s)");
+
+                    if (request.isCancelled()) {
+                        return InferenceResult.fail("Cancelled by user.");
+                    }
+                }
+
+                request.reportProgress("Decoding latents with VAE\u2026");
+                float[][][][] scaledLatents = scaleLatents(latents, 1f / 0.18215f);
+                OnnxTensor latentTensor = OnnxTensor.createTensor(environment, scaledLatents);
+                Map<String, OnnxTensor> vaeInputs = new HashMap<>();
+                vaeInputs.put(resolveInputName(vaeDecoder, "latent", 0), latentTensor);
+
+                float[][][][] decoded;
+                try (OrtSession.Result vaeResult = vaeDecoder.run(vaeInputs)) {
+                    decoded = extractTensor4d(vaeResult);
+                } finally {
+                    latentTensor.close();
+                }
+
+                if (decoded == null || decoded.length == 0) {
+                    return InferenceResult.fail("VAE decoder output is empty.");
+                }
+
+                BufferedImage image = tensorToImage(decoded[0]);
+                Path outputPath = writeOutputImage(image, "sd-turbo");
+                return InferenceResult.ok(
+                        "Generated image for prompt: \"" + request.prompt() + "\"",
+                        "SD Turbo pipeline completed (" + steps + " steps) | EP=" + provider,
+                        outputPath.toString(), "image");
+            }
+        } catch (Exception ex) {
+            return InferenceResult.fail("SD Turbo pipeline failed: " + ex.getMessage());
+        }
+    }
+
+    /** Resolve tokenizer file — try sd-turbo dir first, then fall back to sd-v1.5 dir. */
+    private Path resolveTokenizerFile(Path turboBase, String relativeName) {
+        Path turboPath = turboBase.resolve(relativeName);
+        if (java.nio.file.Files.exists(turboPath)) { return turboPath; }
+        Path v15Path = storage.root().resolve("text-image").resolve("stable-diffusion-v15").resolve(relativeName);
+        if (java.nio.file.Files.exists(v15Path)) { return v15Path; }
+        return turboPath; // will trigger missing-file error
+    }
+
+    /** Generate evenly-spaced timesteps for turbo distillation (1000 → 0 in `steps` jumps). */
+    private static int[] turboTimesteps(int steps) {
+        int[] ts = new int[steps];
+        for (int i = 0; i < steps; i++) {
+            ts[i] = (int) (999.0 * (steps - 1 - i) / Math.max(1, steps - 1));
+        }
+        if (steps == 1) { ts[0] = 999; }
+        return ts;
+    }
+
+    /** Approximate sigma from timestep for the turbo scheduler. */
+    private static float turboSigma(int timestep) {
+        // SD Turbo uses ~linear sigma schedule from sqrt(1-alpha_bar) / sqrt(alpha_bar)
+        float t = timestep / 999.0f;
+        float alphaBar = (float) Math.exp(-0.5 * t * t * 12.0); // approximation
+        return (float) Math.sqrt((1 - alphaBar) / alphaBar);
+    }
+
+    /** Euler step: x_{t-1} = x_t + (sigma_prev - sigma) * noise_pred (scaled). */
+    private static float[][][][] eulerStep(float[][][][] latents, float[][][] noisePred,
+                                           float sigma, float sigmaPrev) {
+        int ch = latents[0].length, h = latents[0][0].length, w = latents[0][0][0].length;
+        float[][][][] out = new float[1][ch][h][w];
+        float dt = sigmaPrev - sigma;
+        for (int c = 0; c < ch; c++) {
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    out[0][c][y][x] = latents[0][c][y][x] + dt * noisePred[c][y][x];
+                }
+            }
+        }
+        return out;
+    }
+
+    /* ================================================================== */
+    /*  SDXL Turbo — dual text encoders (CLIP-L + OpenCLIP-bigG),         */
+    /*  1–4 step distilled pipeline, 512×512 native.                      */
+    /* ================================================================== */
+
+    private InferenceResult runSdxlTurbo(OrtEnvironment environment,
+                                         OrtSession.SessionOptions sessionOptions,
+                                         InferenceRequest request,
+                                         String provider) {
+        try {
+            int width  = Math.max(256, (request.width()  / 8) * 8);
+            int height = Math.max(256, (request.height() / 8) * 8);
+            int latentW = width  / 8;
+            int latentH = height / 8;
+            int steps = Math.max(1, Math.min(request.batch() > 0 ? request.batch() : 4, 8));
+
+            Path base = storage.root().resolve("text-image").resolve("sdxl-turbo");
+            Path textEncoder1Path = base.resolve("text_encoder/model.onnx");
+            Path textEncoder2Path = base.resolve("text_encoder_2/model.onnx");
+            Path unetPath         = base.resolve("unet/model.onnx");
+            Path vaeDecoderPath   = base.resolve("vae_decoder/model.onnx");
+            Path vocab1 = base.resolve("tokenizer/vocab.json");
+            Path merges1 = base.resolve("tokenizer/merges.txt");
+            Path vocab2 = base.resolve("tokenizer_2/vocab.json");
+            Path merges2 = base.resolve("tokenizer_2/merges.txt");
+
+            for (Path p : List.of(textEncoder1Path, textEncoder2Path, unetPath, vaeDecoderPath,
+                    vocab1, merges1, vocab2, merges2)) {
+                if (!java.nio.file.Files.exists(p)) {
+                    return InferenceResult.fail("SDXL Turbo bundle is incomplete (missing "
+                            + p.getFileName() + "). Open Models \u2192 Model Manager and download SDXL Turbo.");
+                }
+            }
+
+            ClipTokenizer tok1 = ClipTokenizer.load(vocab1, merges1);
+            ClipTokenizer tok2 = ClipTokenizer.load(vocab2, merges2);
+            long[] tokens1 = tok1.encode(request.prompt(), 77);
+            long[] tokens2 = tok2.encode(request.prompt(), 77);
+
+            request.reportProgress("Loading SDXL Turbo models (2 text encoders, UNet, VAE)\u2026");
+            try (OrtSession enc1 = environment.createSession(textEncoder1Path.toString(), sessionOptions);
+                 OrtSession enc2 = environment.createSession(textEncoder2Path.toString(), sessionOptions);
+                 OrtSession unet = environment.createSession(unetPath.toString(), sessionOptions);
+                 OrtSession vae  = environment.createSession(vaeDecoderPath.toString(), sessionOptions)) {
+
+                request.reportProgress("Encoding text (CLIP-L)\u2026");
+                float[][][] embed1 = runTextEncoder(environment, enc1, tokens1); // [1, 77, 768]
+
+                request.reportProgress("Encoding text (OpenCLIP-bigG)\u2026");
+                // text_encoder_2 outputs both hidden_states [1, 77, 1280] and pooled [1, 1280]
+                float[][][] embed2;
+                float[][] pooledOutput;
+                {
+                    String inName = resolveInputName(enc2, "input_ids", 0);
+                    TensorInfo tInfo = (TensorInfo) enc2.getInputInfo().get(inName).getInfo();
+                    boolean wantsInt32 = tInfo.type.toString().contains("INT32");
+                    OnnxTensor idsTensor;
+                    if (wantsInt32) {
+                        int[] ids32 = new int[tokens2.length];
+                        for (int i = 0; i < tokens2.length; i++) { ids32[i] = (int) tokens2[i]; }
+                        idsTensor = OnnxTensor.createTensor(environment, new int[][]{ids32});
+                    } else {
+                        idsTensor = OnnxTensor.createTensor(environment, new long[][]{tokens2});
+                    }
+                    Map<String, OnnxTensor> inputs = new HashMap<>();
+                    inputs.put(inName, idsTensor);
+                    try (OrtSession.Result r = enc2.run(inputs)) {
+                        embed2 = null;
+                        pooledOutput = null;
+                        for (Map.Entry<String, OnnxValue> entry : r) {
+                            if (entry.getValue() instanceof OnnxTensor t) {
+                                Object v = t.getValue();
+                                if (v instanceof float[][][] arr3d && embed2 == null) {
+                                    embed2 = arr3d;
+                                } else if (v instanceof float[][] arr2d && pooledOutput == null) {
+                                    pooledOutput = arr2d;
+                                }
+                            }
+                        }
+                        if (embed2 == null) {
+                            return InferenceResult.fail("Text encoder 2 produced no hidden states.");
+                        }
+                        if (pooledOutput == null) {
+                            // Fallback: use zeros for pooled output
+                            pooledOutput = new float[1][1280];
+                        }
+                    } finally {
+                        idsTensor.close();
+                    }
+                }
+
+                // Concatenate embeddings: [1, 77, 768] + [1, 77, 1280] → [1, 77, 2048]
+                int seqLen = embed1[0].length;
+                int dim1 = embed1[0][0].length;
+                int dim2 = embed2[0][0].length;
+                float[][][] combined = new float[1][seqLen][dim1 + dim2];
+                for (int s = 0; s < seqLen; s++) {
+                    System.arraycopy(embed1[0][s], 0, combined[0][s], 0, dim1);
+                    System.arraycopy(embed2[0][s], 0, combined[0][s], dim1, dim2);
+                }
+
+                // time_ids: [original_h, original_w, crop_y, crop_x, target_h, target_w]
+                float[][] timeIds = {{height, width, 0, 0, height, width}};
+
+                float[][][][] latents = randomLatents(request.seed(), latentH, latentW);
+                int[] timesteps = turboTimesteps(steps);
+
+                request.reportProgress("Denoising: 0/" + steps + " steps (SDXL Turbo) \u2014 EP: " + provider);
+                long stepStart = System.currentTimeMillis();
+                for (int i = 0; i < timesteps.length; i++) {
+                    int t = timesteps[i];
+
+                    OnnxTensor sampleT   = OnnxTensor.createTensor(environment, latents);
+                    OnnxTensor tsT       = createTimestepTensor(environment, unet, t);
+                    OnnxTensor hiddenT   = OnnxTensor.createTensor(environment, combined);
+                    OnnxTensor embedsT   = OnnxTensor.createTensor(environment, pooledOutput);
+                    OnnxTensor timeIdsT  = OnnxTensor.createTensor(environment, timeIds);
+
+                    Map<String, OnnxTensor> unetInputs = new HashMap<>();
+                    unetInputs.put(resolveInputName(unet, "sample", 0), sampleT);
+                    unetInputs.put(resolveInputName(unet, "timestep", 1), tsT);
+                    unetInputs.put(resolveInputName(unet, "encoder_hidden_states", 2), hiddenT);
+                    // SDXL UNet has additional inputs: text_embeds and time_ids
+                    for (String name : unet.getInputNames()) {
+                        if (name.contains("text_embeds") || name.contains("added_cond_kwargs.text_embeds")) {
+                            unetInputs.put(name, embedsT);
+                        } else if (name.contains("time_ids") || name.contains("added_cond_kwargs.time_ids")) {
+                            unetInputs.put(name, timeIdsT);
+                        }
+                    }
+
+                    float[][][][] noise;
+                    try (OrtSession.Result unetResult = unet.run(unetInputs)) {
+                        noise = extractTensor4d(unetResult);
+                    } finally {
+                        sampleT.close(); tsT.close(); hiddenT.close(); embedsT.close(); timeIdsT.close();
+                    }
+
+                    if (noise == null || noise.length == 0) {
+                        return InferenceResult.fail("SDXL Turbo UNet produced invalid output.");
+                    }
+
+                    float sigma = turboSigma(t);
+                    float sigmaPrev = (i + 1 < timesteps.length) ? turboSigma(timesteps[i + 1]) : 0f;
+                    latents = eulerStep(latents, noise[0], sigma, sigmaPrev);
+
+                    long elapsed = System.currentTimeMillis() - stepStart;
+                    stepStart = System.currentTimeMillis();
+                    request.reportProgress("Denoising: " + (i + 1) + "/" + steps
+                            + " steps (" + String.format("%.1f", elapsed / 1000.0) + "s/step)");
+
+                    if (request.isCancelled()) {
+                        return InferenceResult.fail("Cancelled by user.");
+                    }
+                }
+
+                request.reportProgress("Decoding latents with VAE\u2026");
+                float[][][][] scaledLatents = scaleLatents(latents, 1f / 0.18215f);
+                OnnxTensor latTensor = OnnxTensor.createTensor(environment, scaledLatents);
+                Map<String, OnnxTensor> vaeIn = new HashMap<>();
+                vaeIn.put(resolveInputName(vae, "latent", 0), latTensor);
+
+                float[][][][] decoded;
+                try (OrtSession.Result vaeResult = vae.run(vaeIn)) {
+                    decoded = extractTensor4d(vaeResult);
+                } finally {
+                    latTensor.close();
+                }
+
+                if (decoded == null || decoded.length == 0) {
+                    return InferenceResult.fail("VAE decoder output is empty.");
+                }
+
+                BufferedImage image = tensorToImage(decoded[0]);
+                Path outputPath = writeOutputImage(image, "sdxl-turbo");
+                return InferenceResult.ok(
+                        "Generated image for prompt: \"" + request.prompt() + "\"",
+                        "SDXL Turbo pipeline completed (" + steps + " steps) | EP=" + provider,
+                        outputPath.toString(), "image");
+            }
+        } catch (Exception ex) {
+            return InferenceResult.fail("SDXL Turbo pipeline failed: " + ex.getMessage());
+        }
+    }
+
+    /* ================================================================== */
+    /*  Image-to-Image / Inpainting (SD v1.5 or SD Turbo ONNX)           */
+    /* ================================================================== */
+
+    private InferenceResult runImg2Img(OrtEnvironment environment,
+                                       OrtSession.SessionOptions sessionOptions,
+                                       InferenceRequest request,
+                                       String provider,
+                                       boolean turboMode) {
+        try {
+            String inputPath = request.inputImagePath();
+            if (inputPath == null || inputPath.isBlank()) {
+                return InferenceResult.fail("Img2Img requires an input image. Choose an image first.");
+            }
+
+            BufferedImage inputImage = ImageIO.read(new File(inputPath));
+            if (inputImage == null) {
+                return InferenceResult.fail("Cannot read image: " + inputPath);
+            }
+
+            int width  = Math.max(256, (request.width()  / 8) * 8);
+            int height = Math.max(256, (request.height() / 8) * 8);
+            int latentW = width  / 8;
+            int latentH = height / 8;
+            double strength = Math.max(0.01, Math.min(1.0, request.strength()));
+            double guidanceScale = request.promptWeight() > 0 ? request.promptWeight() : 7.5;
+
+            String baseDir = turboMode ? "text-image/sd-turbo" : "text-image/stable-diffusion-v15";
+            Path base = storage.root().resolve(baseDir);
+            Path textEncoderPath = base.resolve("text_encoder/model.onnx");
+            Path unetPath        = base.resolve("unet/model.onnx");
+            Path vaeDecoderPath  = base.resolve("vae_decoder/model.onnx");
+
+            // VAE encoder: prefer local bundle, fall back to SD v1.5's encoder
+            Path vaeEncoderPath = base.resolve("vae_encoder/model.onnx");
+            if (!java.nio.file.Files.exists(vaeEncoderPath)) {
+                vaeEncoderPath = storage.root()
+                        .resolve("text-image/stable-diffusion-v15/vae_encoder/model.onnx");
+            }
+
+            Path vocab = resolveTokenizerFile(base, "tokenizer/vocab.json");
+            Path merges = resolveTokenizerFile(base, "tokenizer/merges.txt");
+
+            for (Path p : List.of(textEncoderPath, unetPath, vaeDecoderPath, vaeEncoderPath, vocab, merges)) {
+                if (!java.nio.file.Files.exists(p)) {
+                    return InferenceResult.fail("Img2Img bundle is incomplete (missing "
+                            + p.getFileName() + "). Download the model + VAE encoder from Model Manager.");
+                }
+            }
+
+            // Resize input image to target dimensions
+            request.reportProgress("Resizing input image to " + width + "\u00d7" + height + "\u2026");
+            BufferedImage resized = resizeImage(inputImage, width, height, "lanczos");
+
+            // Load mask if provided (for inpainting)
+            BufferedImage maskImage = null;
+            float[][][][] maskLatents = null;
+            if (request.maskImagePath() != null && !request.maskImagePath().isBlank()) {
+                maskImage = ImageIO.read(new File(request.maskImagePath()));
+                if (maskImage != null) {
+                    maskImage = resizeImage(maskImage, width, height, "bilinear");
+                    request.reportProgress("Mask loaded for inpainting.");
+                }
+            }
+
+            // Convert input image to tensor [1, 3, H, W] normalized to [-1, 1]
+            float[][][][] imageTensor = imageToLatentInput(resized);
+
+            ClipTokenizer tokenizer = ClipTokenizer.load(vocab, merges);
+            long[] tokens = tokenizer.encode(request.prompt(), 77);
+            long[] uncondTokens = tokenizer.encode("", 77);
+
+            request.reportProgress("Loading models for Img2Img pipeline\u2026");
+            try (OrtSession textEncoder = environment.createSession(textEncoderPath.toString(), sessionOptions);
+                 OrtSession unet = environment.createSession(unetPath.toString(), sessionOptions);
+                 OrtSession vaeDecoder = environment.createSession(vaeDecoderPath.toString(), sessionOptions);
+                 OrtSession vaeEncoder = environment.createSession(vaeEncoderPath.toString(), sessionOptions)) {
+
+                // Text encoding
+                request.reportProgress("Encoding prompt\u2026");
+                float[][][] textEmbed = runTextEncoder(environment, textEncoder, tokens);
+
+                float[][][] promptEmbedding;
+                if (turboMode) {
+                    // SD Turbo: no classifier-free guidance
+                    promptEmbedding = textEmbed;
+                    guidanceScale = 0; // flag for no CFG
+                } else {
+                    float[][][] uncondEmbed = runTextEncoder(environment, textEncoder, uncondTokens);
+                    // Concatenate [uncond, cond] → [2, 77, 768]
+                    promptEmbedding = new float[2][textEmbed[0].length][textEmbed[0][0].length];
+                    System.arraycopy(uncondEmbed[0], 0, promptEmbedding[0], 0, uncondEmbed[0].length);
+                    System.arraycopy(textEmbed[0], 0, promptEmbedding[1], 0, textEmbed[0].length);
+                }
+
+                // Encode input image with VAE
+                request.reportProgress("Encoding input image with VAE\u2026");
+                OnnxTensor imgTensor = OnnxTensor.createTensor(environment, imageTensor);
+                Map<String, OnnxTensor> vaeEncIn = new HashMap<>();
+                vaeEncIn.put(resolveInputName(vaeEncoder, "sample", 0), imgTensor);
+                float[][][][] initLatents;
+                try (OrtSession.Result r = vaeEncoder.run(vaeEncIn)) {
+                    float[][][][] encoded = extractTensor4d(r);
+                    if (encoded == null) {
+                        return InferenceResult.fail("VAE encoder produced no output.");
+                    }
+                    // Scale by VAE scaling factor
+                    initLatents = scaleLatents(encoded, 0.18215f);
+                } finally {
+                    imgTensor.close();
+                }
+
+                // Calculate skip steps based on strength
+                int totalSteps;
+                int skipSteps;
+                if (turboMode) {
+                    totalSteps = Math.max(1, Math.min(request.batch() > 0 ? request.batch() : 4, 8));
+                    skipSteps = Math.max(0, (int) (totalSteps * (1.0 - strength)));
+                } else {
+                    totalSteps = Math.max(1, Math.min(request.batch() > 0 ? request.batch() : 20, 50));
+                    skipSteps = Math.max(0, (int) (totalSteps * (1.0 - strength)));
+                }
+                int activeSteps = totalSteps - skipSteps;
+
+                // Add noise to initial latents at strength level
+                request.reportProgress("Adding noise (strength=" + String.format("%.0f%%", strength * 100) + ")\u2026");
+                float[][][][] latents;
+                if (turboMode) {
+                    int[] timesteps = turboTimesteps(totalSteps);
+                    int startTs = timesteps[skipSteps];
+                    float sigma = turboSigma(startTs);
+                    // noise = random latent × sigma + initLatents
+                    float[][][][] noise = randomLatents(request.seed(), latentH, latentW);
+                    latents = addNoise(initLatents, noise, sigma);
+
+                    // Create mask in latent space if provided
+                    if (maskImage != null) {
+                        maskLatents = createLatentMask(maskImage, latentH, latentW);
+                    }
+
+                    long stepStart = System.currentTimeMillis();
+                    for (int i = skipSteps; i < timesteps.length; i++) {
+                        int t = timesteps[i];
+
+                        OnnxTensor sampleT = OnnxTensor.createTensor(environment, latents);
+                        OnnxTensor tsT = createTimestepTensor(environment, unet, t);
+                        OnnxTensor embedT = OnnxTensor.createTensor(environment, promptEmbedding);
+
+                        Map<String, OnnxTensor> unetInputs = new HashMap<>();
+                        unetInputs.put(resolveInputName(unet, "sample", 0), sampleT);
+                        unetInputs.put(resolveInputName(unet, "timestep", 1), tsT);
+                        unetInputs.put(resolveInputName(unet, "encoder_hidden_states", 2), embedT);
+
+                        float[][][][] noisePred;
+                        try (OrtSession.Result unetResult = unet.run(unetInputs)) {
+                            noisePred = extractTensor4d(unetResult);
+                        } finally {
+                            sampleT.close(); tsT.close(); embedT.close();
+                        }
+
+                        float sigmaT = turboSigma(t);
+                        float sigmaPrev = (i + 1 < timesteps.length) ? turboSigma(timesteps[i + 1]) : 0f;
+                        latents = eulerStep(latents, noisePred[0], sigmaT, sigmaPrev);
+
+                        // Apply mask: preserve original latents where mask is black (0)
+                        if (maskLatents != null) {
+                            latents = applyLatentMask(latents, initLatents, maskLatents);
+                        }
+
+                        long elapsed = System.currentTimeMillis() - stepStart;
+                        stepStart = System.currentTimeMillis();
+                        request.reportProgress("Denoising: " + (i - skipSteps + 1) + "/" + activeSteps
+                                + " steps (" + String.format("%.1f", elapsed / 1000.0) + "s/step) [Img2Img]");
+
+                        if (request.isCancelled()) {
+                            return InferenceResult.fail("Cancelled by user.");
+                        }
+                    }
+                } else {
+                    // SD v1.5 DDIM with img2img
+                    Path schedulerConfig = base.resolve("scheduler/scheduler_config.json");
+                    float[] alphaCumprod = loadAlphaCumprod(schedulerConfig);
+                    int[] fullTimesteps = ddimTimesteps(totalSteps, 1000);
+                    int[] timesteps = new int[activeSteps];
+                    System.arraycopy(fullTimesteps, skipSteps, timesteps, 0, activeSteps);
+
+                    float startAlpha = alphaCumprod[Math.min(timesteps[0], alphaCumprod.length - 1)];
+                    float startSigma = (float) Math.sqrt((1.0 - startAlpha) / startAlpha);
+                    float[][][][] noise = randomLatents(request.seed(), latentH, latentW);
+                    latents = addNoise(initLatents, noise, startSigma);
+
+                    if (maskImage != null) {
+                        maskLatents = createLatentMask(maskImage, latentH, latentW);
+                    }
+
+                    long stepStart = System.currentTimeMillis();
+                    for (int i = 0; i < timesteps.length; i++) {
+                        int t = timesteps[i];
+                        float[][][][] doubled = duplicateBatch(latents);
+                        OnnxTensor sampleT = OnnxTensor.createTensor(environment, doubled);
+                        OnnxTensor tsT = createTimestepTensor(environment, unet, t);
+                        OnnxTensor embedT = OnnxTensor.createTensor(environment,
+                                new float[][][][]{promptEmbedding});
+
+                        Map<String, OnnxTensor> unetInputs = new HashMap<>();
+                        unetInputs.put(resolveInputName(unet, "sample", 0), sampleT);
+                        unetInputs.put(resolveInputName(unet, "timestep", 1), tsT);
+                        unetInputs.put(resolveInputName(unet, "encoder_hidden_states", 2), embedT);
+
+                        float[][][][] noisePred;
+                        try (OrtSession.Result unetResult = unet.run(unetInputs)) {
+                            noisePred = extractTensor4d(unetResult);
+                        } finally {
+                            sampleT.close(); tsT.close(); embedT.close();
+                        }
+
+                        // CFG: split batch and guide
+                        float[][][] guidedNoise = guidance(noisePred[0], noisePred[1], (float) guidanceScale);
+
+                        // DDIM step
+                        int tPrev = (i + 1 < timesteps.length) ? timesteps[i + 1] : 0;
+                        float alphaT = alphaCumprod[Math.min(t, alphaCumprod.length - 1)];
+                        float alphaPrev = (tPrev > 0) ? alphaCumprod[Math.min(tPrev, alphaCumprod.length - 1)] : 1.0f;
+                        latents = ddimStep(latents, guidedNoise, alphaT, alphaPrev);
+
+                        // Apply mask
+                        if (maskLatents != null) {
+                            // Re-noise initial latents at current noise level for blending
+                            float currentSigma = (float) Math.sqrt((1.0 - alphaT) / alphaT);
+                            float[][][][] renaised = addNoise(initLatents, noise, currentSigma);
+                            latents = applyLatentMask(latents, renaised, maskLatents);
+                        }
+
+                        long elapsed = System.currentTimeMillis() - stepStart;
+                        stepStart = System.currentTimeMillis();
+                        request.reportProgress("Denoising: " + (i + 1) + "/" + activeSteps
+                                + " steps (" + String.format("%.1f", elapsed / 1000.0) + "s/step) [Img2Img]");
+
+                        if (request.isCancelled()) {
+                            return InferenceResult.fail("Cancelled by user.");
+                        }
+                    }
+                }
+
+                // VAE decode
+                request.reportProgress("Decoding latents with VAE\u2026");
+                float[][][][] scaledLatents = scaleLatents(latents, 1f / 0.18215f);
+                OnnxTensor latTensor = OnnxTensor.createTensor(environment, scaledLatents);
+                Map<String, OnnxTensor> vaeDecIn = new HashMap<>();
+                vaeDecIn.put(resolveInputName(vaeDecoder, "latent", 0), latTensor);
+                float[][][][] decoded;
+                try (OrtSession.Result vaeResult = vaeDecoder.run(vaeDecIn)) {
+                    decoded = extractTensor4d(vaeResult);
+                } finally {
+                    latTensor.close();
+                }
+                if (decoded == null || decoded.length == 0) {
+                    return InferenceResult.fail("VAE decoder output is empty.");
+                }
+
+                BufferedImage image = tensorToImage(decoded[0]);
+                String prefix = turboMode ? "img2img-turbo" : "img2img-sd15";
+                Path outputPath = writeOutputImage(image, prefix);
+                String mode = (maskImage != null) ? "Inpainting" : "Img2Img";
+                return InferenceResult.ok(
+                        mode + " result for: \"" + request.prompt() + "\"",
+                        mode + " (" + activeSteps + "/" + totalSteps + " steps, strength="
+                                + String.format("%.0f%%", strength * 100) + ") | EP=" + provider,
+                        outputPath.toString(), "image");
+            }
+        } catch (Exception ex) {
+            return InferenceResult.fail("Img2Img pipeline failed: " + ex.getMessage());
+        }
+    }
+
+    /** Convert BufferedImage to [1, 3, H, W] tensor normalized to [-1, 1]. */
+    private float[][][][] imageToLatentInput(BufferedImage image) {
+        int w = image.getWidth();
+        int h = image.getHeight();
+        float[][][][] tensor = new float[1][3][h][w];
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int rgb = image.getRGB(x, y);
+                tensor[0][0][y][x] = ((rgb >> 16) & 0xFF) / 127.5f - 1.0f;
+                tensor[0][1][y][x] = ((rgb >> 8) & 0xFF) / 127.5f - 1.0f;
+                tensor[0][2][y][x] = (rgb & 0xFF) / 127.5f - 1.0f;
+            }
+        }
+        return tensor;
+    }
+
+    /** Add noise to latents: result = latents + noise × sigma. */
+    private float[][][][] addNoise(float[][][][] latents, float[][][][] noise, float sigma) {
+        int c = latents[0].length, h = latents[0][0].length, w = latents[0][0][0].length;
+        float[][][][] out = new float[1][c][h][w];
+        for (int ci = 0; ci < c; ci++)
+            for (int yi = 0; yi < h; yi++)
+                for (int xi = 0; xi < w; xi++)
+                    out[0][ci][yi][xi] = latents[0][ci][yi][xi] + noise[0][ci][yi][xi] * sigma;
+        return out;
+    }
+
+    /** Downsample mask to latent space [1, 1, latentH, latentW] with values 0..1. */
+    private float[][][][] createLatentMask(BufferedImage mask, int latentH, int latentW) {
+        // Simple nearest-neighbor downsample; white (255) = repaint area
+        int imgW = mask.getWidth(), imgH = mask.getHeight();
+        float[][][][] m = new float[1][1][latentH][latentW];
+        for (int y = 0; y < latentH; y++) {
+            for (int x = 0; x < latentW; x++) {
+                int srcX = x * imgW / latentW;
+                int srcY = y * imgH / latentH;
+                int rgb = mask.getRGB(srcX, srcY);
+                // Use luminance; white = 1.0 (repaint), black = 0.0 (keep)
+                float lum = (((rgb >> 16) & 0xFF) + ((rgb >> 8) & 0xFF) + (rgb & 0xFF)) / (3f * 255f);
+                m[0][0][y][x] = lum;
+            }
+        }
+        return m;
+    }
+
+    /** Apply inpainting mask: where mask=1 keep denoised, where mask=0 keep original. */
+    private float[][][][] applyLatentMask(float[][][][] denoised, float[][][][] original,
+                                          float[][][][] mask) {
+        int c = denoised[0].length, h = denoised[0][0].length, w = denoised[0][0][0].length;
+        float[][][][] out = new float[1][c][h][w];
+        for (int ci = 0; ci < c; ci++)
+            for (int yi = 0; yi < h; yi++)
+                for (int xi = 0; xi < w; xi++) {
+                    float m = mask[0][0][yi][xi]; // 0..1
+                    out[0][ci][yi][xi] = denoised[0][ci][yi][xi] * m + original[0][ci][yi][xi] * (1f - m);
+                }
+        return out;
+    }
+
+    /** Generate DDIM timestep schedule (evenly spaced). */
+    private int[] ddimTimesteps(int numSteps, int maxTimestep) {
+        int[] ts = new int[numSteps];
+        for (int i = 0; i < numSteps; i++) {
+            ts[i] = (int) ((maxTimestep - 1) * (1.0 - (double) i / numSteps));
+        }
+        return ts;
     }
 
     private InferenceResult runRealEsrgan(OrtEnvironment environment, OrtSession session, InferenceRequest request, String provider) {
@@ -276,6 +991,9 @@ public class GenericOnnxService implements InferenceService {
             // Run ESRGAN for each pass.
             BufferedImage current = inputImage;
             for (int pass = 0; pass < passes; pass++) {
+                if (request.isCancelled()) {
+                    return InferenceResult.fail("Cancelled by user.");
+                }
                 request.reportProgress("Upscaling pass " + (pass + 1) + "/" + passes
                         + " (" + current.getWidth() + "\u00d7" + current.getHeight() + " \u2192 "
                         + (current.getWidth() * scaleFactor) + "\u00d7" + (current.getHeight() * scaleFactor) + ")\u2026");

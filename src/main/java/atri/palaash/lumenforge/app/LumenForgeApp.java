@@ -50,6 +50,10 @@ public class LumenForgeApp {
         if (osName.contains("mac")) {
             System.setProperty("apple.laf.useScreenMenuBar", "true");
             System.setProperty("apple.awt.application.name", "LumenForge");
+            System.setProperty("apple.awt.application.appearance", "system");
+            // Enable FlatLaf embedded title bar on macOS for a unified toolbar look
+            System.setProperty("flatlaf.menuBarEmbedded", "true");
+            System.setProperty("flatlaf.useWindowDecorations", "false");
         }
     }
 }

@@ -16,9 +16,11 @@ import javax.swing.JComboBox;
 import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTextField;
 import javax.swing.JTextPane;
+import javax.swing.KeyStroke;
 import javax.swing.SwingUtilities;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.BorderLayout;
@@ -29,6 +31,14 @@ import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridLayout;
 import java.awt.Image;
+import java.awt.Toolkit;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.dnd.DnDConstants;
+import java.awt.dnd.DropTarget;
+import java.awt.dnd.DropTargetAdapter;
+import java.awt.dnd.DropTargetDropEvent;
+import java.awt.event.ActionEvent;
+import java.awt.event.KeyEvent;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.nio.file.Files;
@@ -36,7 +46,10 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Image Upscale panel. Clean two-step UI: pick a model, browse an input image,
@@ -65,7 +78,9 @@ public class ImageUpscalePanel extends JPanel {
     private final JLabel afterPreview;
     private final JLabel statusLabel;
     private final JButton runButton;
+    private final JButton cancelButton;
     private final JButton saveButton;
+    private final JProgressBar progressBar;
 
     /* Log */
     private final JTextPane logArea;
@@ -74,6 +89,8 @@ public class ImageUpscalePanel extends JPanel {
     private String lastArtifactPath = "";
     private boolean running;
     private BooleanSupplier gpuSupplier = () -> true;
+    private AtomicBoolean cancellationFlag;
+    private static final Pattern PASS_PATTERN = Pattern.compile("pass\\s+(\\d+)/(\\d+)", Pattern.CASE_INSENSITIVE);
 
     public ImageUpscalePanel(List<ModelDescriptor> models,
                              ModelDownloader modelDownloader,
@@ -128,8 +145,17 @@ public class ImageUpscalePanel extends JPanel {
         statusLabel.setBorder(BorderFactory.createEmptyBorder(6, 20, 8, 20));
 
         runButton = new JButton("Upscale");
+        cancelButton = new JButton("Cancel");
+        cancelButton.setEnabled(false);
+        cancelButton.setToolTipText("Cancel the current upscale operation");
         saveButton = new JButton("Save Output");
         saveButton.setEnabled(false);
+
+        progressBar = new JProgressBar();
+        progressBar.setIndeterminate(true);
+        progressBar.setVisible(false);
+        progressBar.setPreferredSize(new Dimension(0, 4));
+        progressBar.setMaximumSize(new Dimension(Integer.MAX_VALUE, 4));
 
         logArea = new JTextPane();
         logArea.setEditable(false);
@@ -138,7 +164,38 @@ public class ImageUpscalePanel extends JPanel {
         /* ---- listeners ---- */
         browseButton.addActionListener(e -> browseInput());
         runButton.addActionListener(e -> runInference());
+        cancelButton.addActionListener(e -> cancelInference());
         saveButton.addActionListener(e -> saveOutput());
+
+        /* ---- keyboard shortcuts ---- */
+        int menuMask = Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx();
+        getInputMap(WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, menuMask), "upscale");
+        getActionMap().put("upscale", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                if (!running) { runInference(); }
+            }
+        });
+        getInputMap(WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_S, menuMask), "save");
+        getActionMap().put("save", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { saveOutput(); }
+        });
+        getInputMap(WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_PERIOD, menuMask), "cancel");
+        getActionMap().put("cancel", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                if (running) { cancelInference(); }
+            }
+        });
+
+        /* ---- tooltips ---- */
+        modelCombo.setToolTipText("Choose an ONNX upscale model");
+        browseButton.setToolTipText("Select an image file to upscale");
+        outputResolutionBox.setToolTipText("Target output resolution");
+        resizeMethodBox.setToolTipText("Method used for resizing (ESRGAN Multi-Pass recommended)");
+        runButton.setToolTipText("Upscale image (\u2318Enter)");
+        saveButton.setToolTipText("Save upscaled image (\u2318S)");
 
         if (models.isEmpty()) {
             statusLabel.setText("No upscale models \u2014 open Models \u2192 Model Manager to get started.");
@@ -199,12 +256,18 @@ public class ImageUpscalePanel extends JPanel {
         JPanel actionRow = new JPanel(new BorderLayout(8, 0));
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         saveButton.setPreferredSize(new Dimension(120, 32));
+        cancelButton.setPreferredSize(new Dimension(90, 32));
         runButton.setPreferredSize(new Dimension(120, 32));
         buttons.add(saveButton);
+        buttons.add(cancelButton);
         buttons.add(runButton);
         actionRow.add(buttons, BorderLayout.EAST);
         cap(actionRow, 40);
         top.add(actionRow);
+
+        /* Progress bar */
+        top.add(Box.createVerticalStrut(4));
+        top.add(progressBar);
 
         /* Bottom: preview + log */
         JPanel bottom = new JPanel(new BorderLayout());
@@ -226,6 +289,30 @@ public class ImageUpscalePanel extends JPanel {
         add(top, BorderLayout.NORTH);
         add(bottom, BorderLayout.CENTER);
         add(statusLabel, BorderLayout.SOUTH);
+
+        /* ---- drag & drop ---- */
+        new DropTarget(this, DnDConstants.ACTION_COPY, new DropTargetAdapter() {
+            @Override
+            public void drop(DropTargetDropEvent dtde) {
+                try {
+                    dtde.acceptDrop(DnDConstants.ACTION_COPY);
+                    @SuppressWarnings("unchecked")
+                    java.util.List<File> files = (java.util.List<File>)
+                            dtde.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);
+                    if (files != null && !files.isEmpty()) {
+                        File f = files.get(0);
+                        String name = f.getName().toLowerCase();
+                        if (name.endsWith(".png") || name.endsWith(".jpg")
+                                || name.endsWith(".jpeg") || name.endsWith(".bmp")) {
+                            inputImagePath = f.getAbsolutePath();
+                            showBeforePreview(f);
+                        }
+                    }
+                } catch (Exception ex) {
+                    appendLog("Drop failed: " + ex.getMessage());
+                }
+            }
+        }, true);
     }
 
     private static JPanel borderedPreview(String title, JLabel label) {
@@ -302,6 +389,7 @@ public class ImageUpscalePanel extends JPanel {
         saveButton.setEnabled(false);
         afterPreview.setIcon(null);
         afterPreview.setText("");
+        cancellationFlag = new AtomicBoolean(false);
 
         CompletableFuture<?> downloadFuture;
         if (!modelDownloader.canDownload(model)) {
@@ -339,7 +427,8 @@ public class ImageUpscalePanel extends JPanel {
                     msg -> SwingUtilities.invokeLater(() -> {
                         setRunning(true, msg);
                         appendLog(msg);
-                    })
+                    }),
+                    cancellationFlag
             ));
         }).whenComplete((result, error) -> SwingUtilities.invokeLater(() -> {
             if (error != null) {
@@ -355,8 +444,30 @@ public class ImageUpscalePanel extends JPanel {
     private void setRunning(boolean busy, String message) {
         running = busy;
         runButton.setEnabled(!busy);
+        cancelButton.setEnabled(busy);
         runButton.setText(busy ? message : "Upscale");
         statusLabel.setText(message);
+        progressBar.setVisible(busy);
+        if (busy) {
+            Matcher m = PASS_PATTERN.matcher(message);
+            if (m.find()) {
+                int current = Integer.parseInt(m.group(1));
+                int total = Integer.parseInt(m.group(2));
+                progressBar.setIndeterminate(false);
+                progressBar.setMaximum(total);
+                progressBar.setValue(current);
+            }
+        } else {
+            progressBar.setIndeterminate(true);
+        }
+    }
+
+    private void cancelInference() {
+        if (cancellationFlag != null) {
+            cancellationFlag.set(true);
+        }
+        cancelButton.setEnabled(false);
+        statusLabel.setText("Cancelling\u2026");
     }
 
     private void renderResult(InferenceResult result) {

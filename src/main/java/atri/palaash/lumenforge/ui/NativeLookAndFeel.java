@@ -84,16 +84,41 @@ public final class NativeLookAndFeel {
 
     /** Tweak FlatLaf UI defaults for a polished, modern feel. */
     private static void configureDefaults() {
+        /* Shape — rounded corners following macOS conventions */
         UIManager.put("Component.arc", 8);
         UIManager.put("Button.arc", 8);
         UIManager.put("TextComponent.arc", 6);
         UIManager.put("CheckBox.arc", 4);
+
+        /* Scrollbar — thin thumb, rounded */
         UIManager.put("ScrollBar.thumbArc", 999);
         UIManager.put("ScrollBar.thumbInsets", new Insets(2, 2, 2, 2));
+        UIManager.put("ScrollBar.width", 10);
         UIManager.put("ScrollPane.smoothScrolling", true);
+
+        /* Title bar — unified background (macOS style) */
         UIManager.put("TitlePane.unifiedBackground", true);
+
+        /* Table */
         UIManager.put("Table.showHorizontalLines", true);
         UIManager.put("Table.showVerticalLines", false);
+        UIManager.put("Table.intercellSpacing", new java.awt.Dimension(0, 1));
+
+        /* Focus indicators — subtle blue ring */
+        UIManager.put("Component.focusWidth", 2);
+        UIManager.put("Component.innerFocusWidth", 0);
+
+        /* Button padding — Apple-style generous padding */
+        UIManager.put("Button.margin", new Insets(4, 14, 4, 14));
+
+        /* ComboBox */
+        UIManager.put("ComboBox.padding", new Insets(3, 6, 3, 6));
+
+        /* List — sidebar-friendly defaults */
+        UIManager.put("List.selectionArc", 8);
+
+        /* Separator */
+        UIManager.put("Separator.stripeWidth", 1);
     }
 
     /* ------------------------------------------------------------------ */

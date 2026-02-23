@@ -118,5 +118,41 @@
                 </dependency>
             </dependencies>
         </profile>
+        <!-- DJL + PyTorch backend (activate with -Ddjl=true) -->
+        <profile>
+            <id>djl-pytorch</id>
+            <activation>
+                <property>
+                    <name>djl</name>
+                    <value>true</value>
+                </property>
+            </activation>
+            <dependencyManagement>
+                <dependencies>
+                    <dependency>
+                        <groupId>ai.djl</groupId>
+                        <artifactId>bom</artifactId>
+                        <version>0.31.0</version>
+                        <type>pom</type>
+                        <scope>import</scope>
+                    </dependency>
+                </dependencies>
+            </dependencyManagement>
+            <dependencies>
+                <dependency>
+                    <groupId>ai.djl</groupId>
+                    <artifactId>api</artifactId>
+                </dependency>
+                <dependency>
+                    <groupId>ai.djl.pytorch</groupId>
+                    <artifactId>pytorch-engine</artifactId>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>ai.djl.huggingface</groupId>
+                    <artifactId>tokenizers</artifactId>
+                </dependency>
+            </dependencies>
+        </profile>
     </profiles>
 </project>

@@ -16,12 +16,14 @@ import javax.swing.JComboBox;
 import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.JTextPane;
 import javax.swing.JToggleButton;
+import javax.swing.KeyStroke;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingUtilities;
 import javax.swing.filechooser.FileNameExtensionFilter;
@@ -33,6 +35,9 @@ import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridLayout;
 import java.awt.Image;
+import java.awt.Toolkit;
+import java.awt.event.ActionEvent;
+import java.awt.event.KeyEvent;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -41,7 +46,10 @@ import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Text → Image panel. Noob-friendly by default: just model + prompt + Generate.
@@ -69,7 +77,9 @@ public class TextToImagePanel extends JPanel {
     private final JLabel outputPreview;
     private final JLabel statusLabel;
     private final JButton runButton;
+    private final JButton cancelButton;
     private final JButton saveButton;
+    private final JProgressBar progressBar;
 
     /* Log / History / Library */
     private final JTextPane logArea;
@@ -84,6 +94,8 @@ public class TextToImagePanel extends JPanel {
     private String lastArtifactPath = "";
     private boolean running;
     private BooleanSupplier gpuSupplier = () -> true;
+    private AtomicBoolean cancellationFlag;
+    private static final Pattern STEP_PATTERN = Pattern.compile("Denoising:\\s*(\\d+)/(\\d+)");
 
     public TextToImagePanel(List<ModelDescriptor> models,
                             ModelDownloader modelDownloader,
@@ -132,8 +144,17 @@ public class TextToImagePanel extends JPanel {
         statusLabel.setBorder(BorderFactory.createEmptyBorder(6, 20, 8, 20));
 
         runButton = new JButton("Generate");
+        cancelButton = new JButton("Cancel");
+        cancelButton.setEnabled(false);
+        cancelButton.setToolTipText("Cancel the current generation");
         saveButton = new JButton("Save Output");
         saveButton.setEnabled(false);
+
+        progressBar = new JProgressBar();
+        progressBar.setIndeterminate(true);
+        progressBar.setVisible(false);
+        progressBar.setPreferredSize(new Dimension(0, 4));
+        progressBar.setMaximumSize(new Dimension(Integer.MAX_VALUE, 4));
 
         logArea = new JTextPane();
         logArea.setEditable(false);
@@ -155,6 +176,7 @@ public class TextToImagePanel extends JPanel {
         /* ---- listeners ---- */
         aspectRatioBox.addActionListener(e -> applyAspectRatio());
         runButton.addActionListener(e -> runInference());
+        cancelButton.addActionListener(e -> cancelInference());
         saveButton.addActionListener(e -> saveOutput());
         promptLibraryPanel.setOnApply(this::applyPreset);
         advancedToggle.addActionListener(e -> {
@@ -163,6 +185,41 @@ public class TextToImagePanel extends JPanel {
             advancedPanel.setVisible(open);
             revalidate();
         });
+
+        /* ---- keyboard shortcuts ---- */
+        int menuMask = Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx();
+        getInputMap(WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, menuMask), "generate");
+        getActionMap().put("generate", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                if (!running) { runInference(); }
+            }
+        });
+        getInputMap(WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_S, menuMask), "save");
+        getActionMap().put("save", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { saveOutput(); }
+        });
+        getInputMap(WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_PERIOD, menuMask), "cancel");
+        getActionMap().put("cancel", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                if (running) { cancelInference(); }
+            }
+        });
+
+        /* ---- tooltips ---- */
+        modelCombo.setToolTipText("Choose an ONNX text-to-image model");
+        promptField.setToolTipText("Describe the image you want to create");
+        negativePromptField.setToolTipText("Concepts to exclude from the generated image");
+        seedSpinner.setToolTipText("Random seed for reproducible results");
+        aspectRatioBox.setToolTipText("Preset aspect ratios for output dimensions");
+        widthField.setToolTipText("Output width in pixels (multiple of 8)");
+        heightField.setToolTipText("Output height in pixels (multiple of 8)");
+        stylePresetBox.setToolTipText("Optional style modifier for the prompt");
+        stepsSpinner.setToolTipText("Fewer steps = faster but lower quality. 10\u201320 recommended.");
+        runButton.setToolTipText("Generate image (\u2318Enter)");
+        saveButton.setToolTipText("Save output image (\u2318S)");
 
         if (models.isEmpty()) {
             statusLabel.setText("No models configured \u2014 open Models \u2192 Model Manager to get started.");
@@ -215,12 +272,18 @@ public class TextToImagePanel extends JPanel {
         JPanel actionRow = new JPanel(new BorderLayout(8, 0));
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         saveButton.setPreferredSize(new Dimension(120, 32));
+        cancelButton.setPreferredSize(new Dimension(90, 32));
         runButton.setPreferredSize(new Dimension(120, 32));
         buttons.add(saveButton);
+        buttons.add(cancelButton);
         buttons.add(runButton);
         actionRow.add(buttons, BorderLayout.EAST);
         cap(actionRow, 40);
         top.add(actionRow);
+
+        /* Progress bar */
+        top.add(Box.createVerticalStrut(4));
+        top.add(progressBar);
 
         /* Bottom: output area with tabs */
         JPanel bottom = new JPanel(new BorderLayout());
@@ -284,6 +347,7 @@ public class TextToImagePanel extends JPanel {
         saveButton.setEnabled(false);
         outputPreview.setIcon(null);
         outputPreview.setText("");
+        cancellationFlag = new AtomicBoolean(false);
 
         CompletableFuture<?> downloadFuture;
         if (!modelDownloader.canDownload(selectedModel)) {
@@ -327,7 +391,8 @@ public class TextToImagePanel extends JPanel {
                     msg -> SwingUtilities.invokeLater(() -> {
                         setRunning(true, msg);
                         appendLog(msg);
-                    })
+                    }),
+                    cancellationFlag
             ));
         }).whenComplete((result, error) -> SwingUtilities.invokeLater(() -> {
             if (error != null) {
@@ -346,8 +411,30 @@ public class TextToImagePanel extends JPanel {
     private void setRunning(boolean busy, String message) {
         running = busy;
         runButton.setEnabled(!busy);
+        cancelButton.setEnabled(busy);
         runButton.setText(busy ? message : "Generate");
         statusLabel.setText(message);
+        progressBar.setVisible(busy);
+        if (busy) {
+            Matcher m = STEP_PATTERN.matcher(message);
+            if (m.find()) {
+                int current = Integer.parseInt(m.group(1));
+                int total = Integer.parseInt(m.group(2));
+                progressBar.setIndeterminate(false);
+                progressBar.setMaximum(total);
+                progressBar.setValue(current);
+            }
+        } else {
+            progressBar.setIndeterminate(true);
+        }
+    }
+
+    private void cancelInference() {
+        if (cancellationFlag != null) {
+            cancellationFlag.set(true);
+        }
+        cancelButton.setEnabled(false);
+        statusLabel.setText("Cancelling\u2026");
     }
 
     private void renderResult(InferenceResult result) {
