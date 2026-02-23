@@ -1,0 +1,50 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build LumenForge",
+			"type": "shell",
+			"command": "mvn",
+			"args": [
+				"-DskipTests",
+				"compile"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Run LumenForge",
+			"type": "shell",
+			"command": "mvn",
+			"args": [
+				"-DskipTests",
+				"compile",
+				"exec:java"
+			],
+			"isBackground": true,
+			"group": {
+				"kind": "test",
+				"isDefault": false
+			}
+		},
+		{
+			"label": "Package LumenForge",
+			"type": "shell",
+			"command": "mvn",
+			"args": [
+				"-DskipTests",
+				"package"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Clean LumenForge",
+			"type": "shell",
+			"command": "mvn",
+			"args": [
+				"clean"
+			],
+			"isBackground": false
+		}
+	]
+}
