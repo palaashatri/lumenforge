@@ -4,6 +4,9 @@ Desktop Java Swing application for Java-native ONNX Runtime workflows with autom
 
 - Text → Image: Stable Diffusion v1.5 UNet + Real-ESRGAN with fully automatic downloads
 
+<img width="2552" height="2026" alt="image" src="https://github.com/user-attachments/assets/8b7a8783-c795-4a2f-844c-beccc9d6855d" />
+
+
 ## Features
 
 - Native look-and-feel handling:
