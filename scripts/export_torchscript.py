@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Export Stable Diffusion v1.5 components to TorchScript format for LumenForge's
+Export Stable Diffusion v1.5 components to TorchScript format for JForge's
 DJL/PyTorch backend.
 
 Usage:
@@ -9,7 +9,7 @@ Usage:
 
 Defaults:
     --model_id   stabilityai/stable-diffusion-2-1  (or runwayml/stable-diffusion-v1-5)
-    --output_dir ~/.lumenforge-models/text-image/sd-pytorch
+    --output_dir ~/.jforge-models/text-image/sd-pytorch
 
 Produces:
     clip_model.pt          — traced CLIP text encoder
@@ -28,7 +28,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export SD to TorchScript for LumenForge")
+    parser = argparse.ArgumentParser(description="Export SD to TorchScript for JForge")
     parser.add_argument(
         "--model_id",
         default="runwayml/stable-diffusion-v1-5",
@@ -36,7 +36,7 @@ def main():
     )
     parser.add_argument(
         "--output_dir",
-        default=os.path.expanduser("~/.lumenforge-models/text-image/sd-pytorch"),
+        default=os.path.expanduser("~/.jforge-models/text-image/sd-pytorch"),
         help="Output directory for TorchScript files"
     )
     parser.add_argument(
@@ -146,7 +146,7 @@ def main():
     print(f"   Output directory: {output}")
     print()
     print("Next steps:")
-    print("  1. Build LumenForge with DJL:  mvn compile -Ddjl=true")
+    print("  1. Build JForge with DJL:  mvn compile -Ddjl=true")
     print("  2. Run:                        mvn exec:java -Ddjl=true")
     print('  3. Select "SD v1.5 PyTorch (DJL)" from the model dropdown')
     print()

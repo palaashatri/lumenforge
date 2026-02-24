@@ -1,10 +1,9 @@
-# LumenForge
+# JForge
 
-[![Build LumenForge](https://github.com/palaashatri/lumenforge/actions/workflows/build.yml/badge.svg)](https://github.com/palaashatri/lumenforge/actions/workflows/build.yml)
+[![Build JForge](https://github.com/palaashatri/jforge/actions/workflows/build.yml/badge.svg)](https://github.com/palaashatri/jforge/actions/workflows/build.yml)
 
 Desktop Java Swing application for ONNX Runtime inference with intelligent GPU acceleration across NVIDIA, Apple, Intel, and AMD hardware.
 
-<img width="2552" height="2026" alt="image" src="https://github.com/user-attachments/assets/8b7a8783-c795-4a2f-844c-beccc9d6855d" />
 
 ## Features
 
@@ -33,10 +32,10 @@ Desktop Java Swing application for ONNX Runtime inference with intelligent GPU a
 - **PyTorch → ONNX auto-conversion**: downloading a PyTorch model triggers automatic conversion via managed Python venv
 - Manual ONNX model import
 - Gated model support with HuggingFace token authentication
-- Local model storage in `~/.lumenforge-models`
+- Local model storage in `~/.jforge-models`
 
 ### GPU Acceleration
-Intelligent execution provider selection — LumenForge probes available EPs at runtime and picks the best one:
+Intelligent execution provider selection — JForge probes available EPs at runtime and picks the best one:
 
 | Platform | Priority (highest → lowest) |
 |---|---|
@@ -44,7 +43,7 @@ Intelligent execution provider selection — LumenForge probes available EPs at 
 | **Windows** | TensorRT-RTX → TensorRT → CUDA → DirectML → OpenVINO → CPU |
 | **Linux** | TensorRT → CUDA → ROCm → OpenVINO → CPU |
 
-Override with `-Dlumenforge.ep=cuda` (or any EP key) to force a specific provider.
+Override with `-Djforge.ep=cuda` (or any EP key) to force a specific provider.
 
 ### UI
 - Native look-and-feel: system-native on macOS, FlatLaf with dark/light detection on Windows/Linux
@@ -54,19 +53,19 @@ Override with `-Dlumenforge.ep=cuda` (or any EP key) to force a specific provide
 
 ## Downloads
 
-Pre-built fat JARs are available from [GitHub Releases](https://github.com/palaashatri/lumenforge/releases):
+Pre-built fat JARs are available from [GitHub Releases](https://github.com/palaashatri/jforge/releases):
 
 | JAR | GPU Support | Use When |
 |---|---|---|
-| `lumenforge-universal.jar` | macOS CoreML (M-series GPU/ANE), CPU everywhere | macOS, or Windows/Linux without NVIDIA GPU |
-| `lumenforge-nvidia.jar` | CUDA + TensorRT (Windows/Linux) | Windows/Linux with NVIDIA GPU + CUDA installed |
+| `jforge-universal.jar` | macOS CoreML (M-series GPU/ANE), CPU everywhere | macOS, or Windows/Linux without NVIDIA GPU |
+| `jforge-nvidia.jar` | CUDA + TensorRT (Windows/Linux) | Windows/Linux with NVIDIA GPU + CUDA installed |
 
 > **Note**: DirectML (AMD/Intel on Windows), OpenVINO (Intel), and ROCm (AMD on Linux) are auto-detected at runtime if the native libraries are installed on the system. The universal JAR handles this automatically.
 
 ```bash
 # Run any variant
-java -jar lumenforge-universal.jar
-java -jar lumenforge-nvidia.jar
+java -jar jforge-universal.jar
+java -jar jforge-nvidia.jar
 ```
 
 ## Build from Source
@@ -112,6 +111,6 @@ See [.github/workflows/build.yml](.github/workflows/build.yml) for details.
 ## Notes
 
 - Runtime is pure Java — ONNX Runtime execution with GPU fallback. No Python bridge needed at inference time.
-- Override EP order via JVM property: `-Dlumenforge.ep=cpu|coreml|cuda|tensorrt|directml|openvino|rocm`
+- Override EP order via JVM property: `-Djforge.ep=cpu|coreml|cuda|tensorrt|directml|openvino|rocm`
 - Task tabs show preview images when output is generated, with **Open Output** to launch the file.
 - If a model requires external tensor files (e.g. `weights.pb`), import the complete ONNX bundle into the model directory.
