@@ -24,6 +24,7 @@ References:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -39,6 +40,19 @@ def error(msg):
     sys.exit(1)
 
 
+def setup_hf_token(token):
+    """Set HuggingFace auth token for gated model access."""
+    if token:
+        os.environ["HF_TOKEN"] = token
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = token
+        try:
+            from huggingface_hub import login
+            login(token=token, add_to_git_credential=False)
+            progress(3, "Authenticated with Hugging Face.")
+        except ImportError:
+            progress(3, "HF token set via environment variable.")
+
+
 # ── Diffusers pipeline export (optimum) ──────────────────────────────────
 
 def convert_diffusers(model_id, output_dir):
@@ -46,7 +60,8 @@ def convert_diffusers(model_id, output_dir):
     Export a HuggingFace diffusers pipeline to ONNX using the Optimum library.
 
     Produces separate ONNX files for each component:
-        unet/model.onnx, text_encoder/model.onnx, vae_decoder/model.onnx, etc.
+        unet/model.onnx or transformer/model.onnx, text_encoder/model.onnx,
+        vae_decoder/model.onnx, etc.
     """
     progress(5, "Importing optimum exporters…")
     try:
@@ -60,17 +75,24 @@ def convert_diffusers(model_id, output_dir):
     progress(10, f"Resolving model: {model_id}")
 
     # Try common diffusers export tasks in order of specificity.
-    tasks = ["stable-diffusion-xl", "stable-diffusion"]
+    # SD 3.x uses 'stable-diffusion-3', SDXL uses 'stable-diffusion-xl',
+    # SD 1.x/2.x uses 'stable-diffusion'.
+    tasks = ["stable-diffusion-3", "stable-diffusion-xl", "stable-diffusion"]
 
     for task in tasks:
         try:
             progress(15, f"Attempting export with task='{task}'…")
-            main_export(
-                model_name_or_path=model_id,
-                output=Path(output_dir),
-                task=task,
-                fp16=False,   # FP32 for broadest HW compatibility
-            )
+            # For SD 3.x, skip T5 by default to keep model size manageable
+            kwargs = {
+                "model_name_or_path": model_id,
+                "output": Path(output_dir),
+                "task": task,
+                "fp16": False,
+            }
+            # Some optimum versions accept no_post_process for SD3
+            if task == "stable-diffusion-3":
+                progress(15, "Note: SD 3.x export may take 10-30 minutes and ~32GB RAM.")
+            main_export(**kwargs)
             progress(100, f"Export complete (task={task}).")
             return
         except Exception as exc:
@@ -82,7 +104,8 @@ def convert_diffusers(model_id, output_dir):
             # Real error — report and stop
             error(str(exc))
 
-    error(f"Could not auto-detect a compatible export task for '{model_id}'.")
+    error(f"Could not auto-detect a compatible export task for '{model_id}'. "
+          f"Tried: {', '.join(tasks)}")
 
 
 # ── Generic PyTorch model export (torch.onnx.export) ────────────────────
@@ -192,9 +215,16 @@ def main():
         help="Input tensor shape for generic mode, comma-separated "
              "(default: 1,3,224,224)",
     )
+    ap.add_argument(
+        "--hf_token", default="",
+        help="HuggingFace auth token for gated models (e.g. SD 3.5)",
+    )
     args = ap.parse_args()
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    if args.hf_token:
+        setup_hf_token(args.hf_token)
 
     if args.mode == "diffusers":
         convert_diffusers(args.model_id, args.output_dir)

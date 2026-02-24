@@ -116,6 +116,22 @@ public class PyTorchToOnnxConverter {
                 || lower.contains("torchscript");
     }
 
+    /**
+     * Return {@code true} if the model ID looks like a gated HuggingFace model
+     * that requires authentication to download.
+     */
+    public static boolean isLikelyGatedModel(String modelId) {
+        if (modelId == null) return false;
+        String lower = modelId.toLowerCase();
+        // Known gated model families
+        return lower.contains("stable-diffusion-3")
+                || lower.contains("sd3")
+                || lower.contains("sd-3")
+                || lower.contains("flux")
+                || lower.contains("llama")
+                || lower.contains("gemma");
+    }
+
     /* ── Main conversion entry point ─────────────────────────────────── */
 
     /**
@@ -133,6 +149,19 @@ public class PyTorchToOnnxConverter {
      * @throws ConversionException     if any step fails
      */
     public Path convert(String modelId, Path outputDir, String mode) {
+        return convert(modelId, outputDir, mode, null);
+    }
+
+    /**
+     * Run the full PyTorch → ONNX conversion with optional HuggingFace auth token.
+     *
+     * @param modelId   HuggingFace model ID or local path to a .pt/.pth file
+     * @param outputDir directory to write converted ONNX file(s)
+     * @param mode      {@code "diffusers"} or {@code "generic"}
+     * @param hfToken   HuggingFace auth token for gated models (may be null)
+     * @return the output directory on success
+     */
+    public Path convert(String modelId, Path outputDir, String mode, String hfToken) {
         // 1. Locate Python
         String pythonCmd = findPython();
         if (pythonCmd == null) {
@@ -176,7 +205,7 @@ public class PyTorchToOnnxConverter {
             throw new ConversionException("Cannot create output directory: " + ex.getMessage());
         }
 
-        runConversionScript(venvPython, scriptPath, modelId, outputDir, mode);
+        runConversionScript(venvPython, scriptPath, modelId, outputDir, mode, hfToken);
 
         report("Conversion complete → " + outputDir);
         return outputDir;
@@ -248,7 +277,8 @@ public class PyTorchToOnnxConverter {
      * Run the conversion script and parse PROGRESS / ERROR lines from stdout.
      */
     private void runConversionScript(String python, Path script,
-                                     String modelId, Path outputDir, String mode) {
+                                     String modelId, Path outputDir, String mode,
+                                     String hfToken) {
         try {
             ProcessBuilder pb = new ProcessBuilder(
                     python,
@@ -257,6 +287,14 @@ public class PyTorchToOnnxConverter {
                     "--output_dir", outputDir.toString(),
                     "--mode", mode
             );
+            // Pass HF token as both env var and CLI arg for gated models
+            if (hfToken != null && !hfToken.isBlank()) {
+                pb.environment().put("HF_TOKEN", hfToken);
+                pb.environment().put("HUGGING_FACE_HUB_TOKEN", hfToken);
+                // Append --hf_token arg
+                pb.command().add("--hf_token");
+                pb.command().add(hfToken);
+            }
             pb.redirectErrorStream(true);
             Process process = pb.start();
 

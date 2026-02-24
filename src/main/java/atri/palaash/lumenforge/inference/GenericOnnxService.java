@@ -20,6 +20,7 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.FloatBuffer;
 import java.nio.file.Path;
+import java.text.Normalizer;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -45,6 +46,7 @@ public class GenericOnnxService implements InferenceService {
     /* ── Session & Tokenizer Caches ────────────────────────────────── */
     private static final ConcurrentHashMap<String, OrtSession> SESSION_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, ClipTokenizer> TOKENIZER_CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, T5Tokenizer> T5_TOKENIZER_CACHE = new ConcurrentHashMap<>();
     private static volatile String cachedEpKey = "";
 
     private final TaskType taskType;
@@ -92,6 +94,20 @@ public class GenericOnnxService implements InferenceService {
     }
 
     /**
+     * Get or load a T5Tokenizer — tokenizer.json is cached in memory.
+     */
+    private T5Tokenizer getOrCreateT5Tokenizer(Path tokenizerJsonPath) throws Exception {
+        String key = tokenizerJsonPath.toAbsolutePath().toString();
+        T5Tokenizer cached = T5_TOKENIZER_CACHE.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        T5Tokenizer tokenizer = T5Tokenizer.load(tokenizerJsonPath);
+        T5_TOKENIZER_CACHE.put(key, tokenizer);
+        return tokenizer;
+    }
+
+    /**
      * Evict all cached ORT sessions (e.g. when the user explicitly wants
      * a fresh start or switches execution providers). Also clears the
      * tokenizer cache.
@@ -102,6 +118,7 @@ public class GenericOnnxService implements InferenceService {
         });
         SESSION_CACHE.clear();
         TOKENIZER_CACHE.clear();
+        T5_TOKENIZER_CACHE.clear();
         cachedEpKey = "";
     }
 
@@ -152,6 +169,11 @@ public class GenericOnnxService implements InferenceService {
                 }
                 if ("sdxl_base_onnx".equals(request.model().id())) {
                     return runSdxlBase(environment, sessionOptions, request, providerSelection.provider());
+                }
+                // SD 3.x (converted) — detected by transformer/ directory structure
+                if (request.model().relativePath() != null
+                        && request.model().relativePath().contains("transformer/")) {
+                    return runSd3(environment, sessionOptions, request, providerSelection.provider());
                 }
                 // DJL/PyTorch models — delegate to the DJL backend
                 if (request.model().id().contains("pytorch")) {
@@ -933,6 +955,436 @@ public class GenericOnnxService implements InferenceService {
             }
         } catch (Exception ex) {
             return InferenceResult.fail("SDXL Base pipeline failed: " + ex.getMessage());
+        }
+    }
+
+    /* ================================================================== */
+    /*  Stable Diffusion 3.x — MMDiT transformer, Flow Matching Euler,    */
+    /*  dual CLIP encoders (L + G), 16-channel latents, 1024×1024.        */
+    /* ================================================================== */
+
+    private InferenceResult runSd3(OrtEnvironment environment,
+                                   OrtSession.SessionOptions sessionOptions,
+                                   InferenceRequest request,
+                                   String provider) {
+        try {
+            int width  = Math.max(512, (request.width()  / 8) * 8);
+            int height = Math.max(512, (request.height() / 8) * 8);
+            int latentW = width  / 8;
+            int latentH = height / 8;
+            int steps = Math.max(5, Math.min(request.batch() > 0 ? request.batch() : 28, 50));
+            float guidanceScale = request.promptWeight() > 0 ? (float) request.promptWeight() : 7.0f;
+            float shiftFactor = 3.0f; // SD 3.5 medium schedule shift
+
+            // Resolve model directory from the relativePath
+            Path modelPath = storage.modelPath(request.model());
+            Path base = modelPath.getParent().getParent(); // go up from transformer/model.onnx
+
+            Path transformerPath = base.resolve("transformer/model.onnx");
+            Path textEncoder1Path = base.resolve("text_encoder/model.onnx");
+            Path textEncoder2Path = base.resolve("text_encoder_2/model.onnx");
+            Path vaeDecoderPath   = base.resolve("vae_decoder/model.onnx");
+            Path vocab1 = base.resolve("tokenizer/vocab.json");
+            Path merges1 = base.resolve("tokenizer/merges.txt");
+            Path vocab2 = base.resolve("tokenizer_2/vocab.json");
+            Path merges2 = base.resolve("tokenizer_2/merges.txt");
+
+            for (Path p : List.of(transformerPath, textEncoder1Path, textEncoder2Path,
+                    vaeDecoderPath, vocab1, merges1, vocab2, merges2)) {
+                if (!java.nio.file.Files.exists(p)) {
+                    return InferenceResult.fail("SD 3.x bundle is incomplete (missing "
+                            + base.relativize(p) + "). Convert the full model first.");
+                }
+            }
+
+            // Optional T5 text encoder
+            Path textEncoder3Path = base.resolve("text_encoder_3/model.onnx");
+            Path tokenizer3Json   = base.resolve("tokenizer_3/tokenizer.json");
+            boolean hasT5 = java.nio.file.Files.exists(textEncoder3Path)
+                    && java.nio.file.Files.exists(tokenizer3Json);
+
+            ClipTokenizer tok1 = getOrCreateTokenizer(vocab1, merges1);
+            ClipTokenizer tok2 = getOrCreateTokenizer(vocab2, merges2);
+            T5Tokenizer tok3 = hasT5 ? getOrCreateT5Tokenizer(tokenizer3Json) : null;
+            long[] tokens1 = tok1.encode(request.prompt(), 77);
+            long[] tokens2 = tok2.encode(request.prompt(), 77);
+            long[] negTokens1 = tok1.encode(request.negativePrompt() == null ? "" : request.negativePrompt(), 77);
+            long[] negTokens2 = tok2.encode(request.negativePrompt() == null ? "" : request.negativePrompt(), 77);
+            long[] t5Tokens = hasT5 ? tok3.encode(request.prompt(), 256) : null;
+            long[] t5NegTokens = hasT5 ? tok3.encode(
+                    request.negativePrompt() == null ? "" : request.negativePrompt(), 256) : null;
+
+            request.reportProgress("Loading SD 3.x models (transformer, "
+                    + (hasT5 ? "3" : "2") + " text encoders, VAE)…");
+            OrtSession enc1 = getOrCreateSession(environment, textEncoder1Path, sessionOptions);
+            OrtSession enc2 = getOrCreateSession(environment, textEncoder2Path, sessionOptions);
+            OrtSession transformer = getOrCreateSession(environment, transformerPath, sessionOptions);
+            OrtSession vae  = getOrCreateSession(environment, vaeDecoderPath, sessionOptions);
+            OrtSession enc3 = hasT5 ? getOrCreateSession(environment, textEncoder3Path, sessionOptions) : null;
+
+            // ── Encode positive prompt ──
+            request.reportProgress("Encoding positive prompt (CLIP-L)…");
+            float[][][] embed1 = runTextEncoder(environment, enc1, tokens1);
+
+            request.reportProgress("Encoding positive prompt (CLIP-G)…");
+            float[][][] embed2;
+            float[][] pooledPos;
+            {
+                String inName = resolveInputName(enc2, "input_ids", 0);
+                TensorInfo tInfo = (TensorInfo) enc2.getInputInfo().get(inName).getInfo();
+                boolean wantsInt32 = tInfo.type.toString().contains("INT32");
+                OnnxTensor idsTensor;
+                if (wantsInt32) {
+                    int[] ids32 = new int[tokens2.length];
+                    for (int i = 0; i < tokens2.length; i++) ids32[i] = (int) tokens2[i];
+                    idsTensor = OnnxTensor.createTensor(environment, new int[][]{ids32});
+                } else {
+                    idsTensor = OnnxTensor.createTensor(environment, new long[][]{tokens2});
+                }
+                Map<String, OnnxTensor> inputs = new HashMap<>();
+                inputs.put(inName, idsTensor);
+                try (OrtSession.Result r = enc2.run(inputs)) {
+                    embed2 = null; pooledPos = null;
+                    for (Map.Entry<String, OnnxValue> entry : r) {
+                        if (entry.getValue() instanceof OnnxTensor t) {
+                            Object v = t.getValue();
+                            if (v instanceof float[][][] a3 && embed2 == null) embed2 = a3;
+                            else if (v instanceof float[][] a2 && pooledPos == null) pooledPos = a2;
+                        }
+                    }
+                    if (embed2 == null) return InferenceResult.fail("CLIP-G produced no hidden states.");
+                    if (pooledPos == null) pooledPos = new float[1][1280];
+                } finally { idsTensor.close(); }
+            }
+
+            // ── Encode negative prompt ──
+            request.reportProgress("Encoding negative prompt…");
+            float[][][] negEmbed1 = runTextEncoder(environment, enc1, negTokens1);
+            float[][][] negEmbed2;
+            float[][] pooledNeg;
+            {
+                String inName = resolveInputName(enc2, "input_ids", 0);
+                TensorInfo tInfo = (TensorInfo) enc2.getInputInfo().get(inName).getInfo();
+                boolean wantsInt32 = tInfo.type.toString().contains("INT32");
+                OnnxTensor idsTensor;
+                if (wantsInt32) {
+                    int[] ids32 = new int[negTokens2.length];
+                    for (int i = 0; i < negTokens2.length; i++) ids32[i] = (int) negTokens2[i];
+                    idsTensor = OnnxTensor.createTensor(environment, new int[][]{ids32});
+                } else {
+                    idsTensor = OnnxTensor.createTensor(environment, new long[][]{negTokens2});
+                }
+                Map<String, OnnxTensor> inputs = new HashMap<>();
+                inputs.put(inName, idsTensor);
+                try (OrtSession.Result r = enc2.run(inputs)) {
+                    negEmbed2 = null; pooledNeg = null;
+                    for (Map.Entry<String, OnnxValue> entry : r) {
+                        if (entry.getValue() instanceof OnnxTensor t) {
+                            Object v = t.getValue();
+                            if (v instanceof float[][][] a3 && negEmbed2 == null) negEmbed2 = a3;
+                            else if (v instanceof float[][] a2 && pooledNeg == null) pooledNeg = a2;
+                        }
+                    }
+                    if (negEmbed2 == null) return InferenceResult.fail("CLIP-G negative produced no hidden states.");
+                    if (pooledNeg == null) pooledNeg = new float[1][1280];
+                } finally { idsTensor.close(); }
+            }
+
+            // ── Combine CLIP embeddings ──
+            // CLIP-L: [1, 77, dim1], CLIP-G: [1, 77, dim2]
+            // Concatenate along last dim → [1, 77, dim1+dim2]
+            int seqLen = embed1[0].length;
+            int dim1 = embed1[0][0].length;  // 768
+            int dim2 = embed2[0][0].length;  // 1280
+            int clipDim = dim1 + dim2;       // 2048
+            int t5Dim = 4096;                // SD3 transformer expects 4096-wide embeddings
+            int t5SeqLen = 256;              // T5 max sequence length in SD3
+
+            // Pad CLIP embeddings to t5Dim (4096) → [1, 77, 4096]
+            float[][][] clipPosEmbed = new float[1][seqLen][t5Dim];
+            float[][][] clipNegEmbed = new float[1][seqLen][t5Dim];
+            for (int s = 0; s < seqLen; s++) {
+                System.arraycopy(embed1[0][s], 0, clipPosEmbed[0][s], 0, dim1);
+                System.arraycopy(embed2[0][s], 0, clipPosEmbed[0][s], dim1, dim2);
+                // Rest is zeros (padding to 4096)
+                System.arraycopy(negEmbed1[0][s], 0, clipNegEmbed[0][s], 0, dim1);
+                System.arraycopy(negEmbed2[0][s], 0, clipNegEmbed[0][s], dim1, dim2);
+            }
+
+            // T5 embeddings: real T5-XXL output or zeros fallback
+            float[][][] t5PosEmbed;
+            float[][][] t5NegEmbed;
+            if (hasT5 && enc3 != null && t5Tokens != null) {
+                request.reportProgress("Encoding positive prompt (T5-XXL)…");
+                t5PosEmbed = runT5Encoder(environment, enc3, t5Tokens, t5SeqLen, t5Dim);
+                request.reportProgress("Encoding negative prompt (T5-XXL)…");
+                t5NegEmbed = runT5Encoder(environment, enc3, t5NegTokens, t5SeqLen, t5Dim);
+            } else {
+                t5PosEmbed = new float[1][t5SeqLen][t5Dim]; // zeros fallback
+                t5NegEmbed = new float[1][t5SeqLen][t5Dim];
+            }
+
+            // Concatenate along sequence: [1, 77+256, 4096] = [1, 333, 4096]
+            int totalSeqLen = seqLen + t5SeqLen;
+            float[][][] encoderHiddenPos = new float[1][totalSeqLen][t5Dim];
+            float[][][] encoderHiddenNeg = new float[1][totalSeqLen][t5Dim];
+            for (int s = 0; s < seqLen; s++) {
+                System.arraycopy(clipPosEmbed[0][s], 0, encoderHiddenPos[0][s], 0, t5Dim);
+                System.arraycopy(clipNegEmbed[0][s], 0, encoderHiddenNeg[0][s], 0, t5Dim);
+            }
+            for (int s = 0; s < t5SeqLen; s++) {
+                System.arraycopy(t5PosEmbed[0][s], 0, encoderHiddenPos[0][seqLen + s], 0, t5Dim);
+                System.arraycopy(t5NegEmbed[0][s], 0, encoderHiddenNeg[0][seqLen + s], 0, t5Dim);
+            }
+
+            // Batch hidden states [2, 333, 4096] — negative first, positive second (for CFG)
+            float[][][] batchedHidden = new float[2][totalSeqLen][t5Dim];
+            batchedHidden[0] = encoderHiddenNeg[0];
+            batchedHidden[1] = encoderHiddenPos[0];
+
+            // Pooled projections: concat CLIP-L pooled + CLIP-G pooled → [1, 2048]
+            // CLIP-L pooled is embed1[0][0] (take first token hidden state as rough pooled — for proper
+            // pooling we'd need the model's pooler, but using first text encoder output it's already 768-d
+            // hidden state at BOS position). Actually, pooledPos is from CLIP-G which outputs it directly.
+            // We need both CLIP-L pooled + CLIP-G pooled = [768 + 1280] = [2048]
+            float[][] embed1Pooled = runTextEncoderPooled(environment, enc1, tokens1);
+            float[][] negEmbed1Pooled = runTextEncoderPooled(environment, enc1, negTokens1);
+
+            int pooledDim = (embed1Pooled != null ? embed1Pooled[0].length : dim1) + pooledPos[0].length;
+            float[][] batchedPooled = new float[2][pooledDim];
+            // Negative
+            if (negEmbed1Pooled != null) System.arraycopy(negEmbed1Pooled[0], 0, batchedPooled[0], 0, negEmbed1Pooled[0].length);
+            System.arraycopy(pooledNeg[0], 0, batchedPooled[0], pooledDim - pooledNeg[0].length, pooledNeg[0].length);
+            // Positive
+            if (embed1Pooled != null) System.arraycopy(embed1Pooled[0], 0, batchedPooled[1], 0, embed1Pooled[0].length);
+            System.arraycopy(pooledPos[0], 0, batchedPooled[1], pooledDim - pooledPos[0].length, pooledPos[0].length);
+
+            // ── Create initial noise (16-channel latents for SD3) ──
+            Random random = new Random(request.seed());
+            float[][][][] latents = new float[1][16][latentH][latentW];
+            for (int c = 0; c < 16; c++)
+                for (int y = 0; y < latentH; y++)
+                    for (int x = 0; x < latentW; x++)
+                        latents[0][c][y][x] = (float) random.nextGaussian();
+
+            // ── Flow Matching Euler schedule ──
+            // SD 3.5 uses a shifted sigma schedule: sigma = shift * t / (1 + (shift-1)*t)
+            float[] sigmas = new float[steps + 1];
+            for (int i = 0; i <= steps; i++) {
+                float t = 1.0f - (float) i / steps; // goes from 1.0 to 0.0
+                sigmas[i] = shiftFactor * t / (1.0f + (shiftFactor - 1.0f) * t);
+            }
+
+            request.reportProgress("Denoising: 0/" + steps + " steps (SD 3.x Flow Matching) — EP: " + provider);
+            long stepStart = System.currentTimeMillis();
+            long firstStepDuration = 0;
+
+            for (int i = 0; i < steps; i++) {
+                float sigma = sigmas[i];
+                float sigmaNext = sigmas[i + 1];
+
+                // Scale timestep to 1000-scale for the model
+                float timestepVal = sigma * 1000.0f;
+
+                // Duplicate latents for CFG batch [2, 16, H, W]
+                float[][][][] batchInput = new float[2][16][latentH][latentW];
+                for (int c = 0; c < 16; c++)
+                    for (int y = 0; y < latentH; y++)
+                        for (int x = 0; x < latentW; x++) {
+                            batchInput[0][c][y][x] = latents[0][c][y][x];
+                            batchInput[1][c][y][x] = latents[0][c][y][x];
+                        }
+
+                OnnxTensor sampleT  = OnnxTensor.createTensor(environment, batchInput);
+                OnnxTensor hiddenT  = OnnxTensor.createTensor(environment, batchedHidden);
+                OnnxTensor pooledT  = OnnxTensor.createTensor(environment, batchedPooled);
+
+                // Create timestep tensor — SD3 transformer may expect float or int
+                OnnxTensor tsT;
+                {
+                    String tsName = resolveInputName(transformer, "timestep", 1);
+                    TensorInfo tsInfo = (TensorInfo) transformer.getInputInfo().get(tsName).getInfo();
+                    if (tsInfo.type.toString().contains("INT64")) {
+                        tsT = OnnxTensor.createTensor(environment, new long[]{(long) timestepVal, (long) timestepVal});
+                    } else if (tsInfo.type.toString().contains("INT32")) {
+                        tsT = OnnxTensor.createTensor(environment, new int[]{(int) timestepVal, (int) timestepVal});
+                    } else {
+                        tsT = OnnxTensor.createTensor(environment, new float[]{timestepVal, timestepVal});
+                    }
+                }
+
+                Map<String, OnnxTensor> transInputs = new HashMap<>();
+                // Map inputs by sniffing the model's input names
+                for (String name : transformer.getInputNames()) {
+                    String lower = name.toLowerCase();
+                    if (lower.contains("hidden_states") || lower.contains("sample")) {
+                        transInputs.put(name, sampleT);
+                    } else if (lower.contains("timestep")) {
+                        transInputs.put(name, tsT);
+                    } else if (lower.contains("encoder_hidden") || lower.contains("prompt_embeds")) {
+                        transInputs.put(name, hiddenT);
+                    } else if (lower.contains("pooled") || lower.contains("text_embeds")) {
+                        transInputs.put(name, pooledT);
+                    }
+                }
+
+                // Fallback: assign by positional index if mapping is empty
+                if (transInputs.isEmpty()) {
+                    var inputNames = new java.util.ArrayList<>(transformer.getInputNames());
+                    if (inputNames.size() >= 4) {
+                        transInputs.put(inputNames.get(0), sampleT);
+                        transInputs.put(inputNames.get(1), tsT);
+                        transInputs.put(inputNames.get(2), hiddenT);
+                        transInputs.put(inputNames.get(3), pooledT);
+                    }
+                }
+
+                float[][][][] noise;
+                try (OrtSession.Result transResult = transformer.run(transInputs)) {
+                    noise = extractTensor4d(transResult);
+                } finally {
+                    sampleT.close(); tsT.close(); hiddenT.close(); pooledT.close();
+                }
+
+                if (noise == null || noise.length < 2) {
+                    return InferenceResult.fail("SD 3.x transformer produced invalid output.");
+                }
+
+                // Classifier-free guidance
+                float[][][] guidedNoise = guidance(noise[0], noise[1], guidanceScale);
+
+                // Flow matching Euler step: latent = latent + (sigma_next - sigma) * velocity
+                float dt = sigmaNext - sigma;
+                for (int c = 0; c < 16; c++)
+                    for (int y = 0; y < latentH; y++)
+                        for (int x = 0; x < latentW; x++)
+                            latents[0][c][y][x] += dt * guidedNoise[c][y][x];
+
+                long elapsed = System.currentTimeMillis() - stepStart;
+                stepStart = System.currentTimeMillis();
+                if (i == 0) firstStepDuration = elapsed;
+                int remaining = steps - (i + 1);
+                long avgMs = (i == 0) ? firstStepDuration : elapsed;
+                long etaSec = (remaining * avgMs) / 1000;
+                String eta = etaSec > 60
+                        ? String.format("%dm %02ds", etaSec / 60, etaSec % 60)
+                        : etaSec + "s";
+                request.reportProgress("Denoising: " + (i + 1) + "/" + steps
+                        + " steps (" + String.format("%.1f", elapsed / 1000.0) + "s/step, ETA: " + eta + ")");
+
+                if (request.isCancelled()) {
+                    return InferenceResult.fail("Cancelled by user.");
+                }
+            }
+
+            // ── Decode with VAE ──
+            // SD3 VAE: latent = latent / scaling_factor + shift_factor
+            // scaling_factor=1.5305, shift_factor=0.0609
+            request.reportProgress("Decoding latents with VAE…");
+            float[][][][] scaledLatents = new float[1][16][latentH][latentW];
+            for (int c = 0; c < 16; c++)
+                for (int y = 0; y < latentH; y++)
+                    for (int x = 0; x < latentW; x++)
+                        scaledLatents[0][c][y][x] = latents[0][c][y][x] / 1.5305f + 0.0609f;
+
+            OnnxTensor latTensor = OnnxTensor.createTensor(environment, scaledLatents);
+            Map<String, OnnxTensor> vaeIn = new HashMap<>();
+            vaeIn.put(resolveInputName(vae, "latent", 0), latTensor);
+
+            float[][][][] decoded;
+            try (OrtSession.Result vaeResult = vae.run(vaeIn)) {
+                decoded = extractTensor4d(vaeResult);
+            } finally {
+                latTensor.close();
+            }
+
+            if (decoded == null || decoded.length == 0) {
+                return InferenceResult.fail("VAE decoder output is empty.");
+            }
+
+            BufferedImage image = tensorToImage(decoded[0]);
+            Path outputPath = writeOutputImage(image, "sd3");
+            return InferenceResult.ok(
+                    "Generated image for prompt: \"" + request.prompt() + "\"",
+                    "SD 3.x pipeline completed (" + steps + " steps, CFG=" + guidanceScale
+                            + ", shift=" + shiftFactor + ") | EP=" + provider
+                            + (hasT5 ? " | T5 encoder active" : " | T5 skipped (CLIP-only)"),
+                    outputPath.toString(), "image");
+        } catch (Exception ex) {
+            return InferenceResult.fail("SD 3.x pipeline failed: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Run a text encoder and attempt to extract the pooled output (second output).
+     * Returns null if the model doesn't produce a 2D pooled output.
+     */
+    private float[][] runTextEncoderPooled(OrtEnvironment env, OrtSession session, long[] tokenIds) throws OrtException {
+        String inName = resolveInputName(session, "input_ids", 0);
+        TensorInfo tInfo = (TensorInfo) session.getInputInfo().get(inName).getInfo();
+        boolean wantsInt32 = tInfo.type.toString().contains("INT32");
+        OnnxTensor idsTensor;
+        if (wantsInt32) {
+            int[] ids32 = new int[tokenIds.length];
+            for (int i = 0; i < tokenIds.length; i++) ids32[i] = (int) tokenIds[i];
+            idsTensor = OnnxTensor.createTensor(env, new int[][]{ids32});
+        } else {
+            idsTensor = OnnxTensor.createTensor(env, new long[][]{tokenIds});
+        }
+        Map<String, OnnxTensor> inputs = new HashMap<>();
+        inputs.put(inName, idsTensor);
+        try (OrtSession.Result r = session.run(inputs)) {
+            for (Map.Entry<String, OnnxValue> entry : r) {
+                if (entry.getValue() instanceof OnnxTensor t) {
+                    Object v = t.getValue();
+                    if (v instanceof float[][] a2) return a2;
+                }
+            }
+        } finally { idsTensor.close(); }
+        return null;
+    }
+
+    /**
+     * Run T5-XXL encoder and return hidden states padded/truncated to [1, maxSeqLen, expectedDim].
+     */
+    private float[][][] runT5Encoder(OrtEnvironment env, OrtSession session,
+                                      long[] tokenIds, int maxSeqLen, int expectedDim) throws OrtException {
+        String inName = resolveInputName(session, "input_ids", 0);
+        TensorInfo tInfo = (TensorInfo) session.getInputInfo().get(inName).getInfo();
+        boolean wantsInt32 = tInfo.type.toString().contains("INT32");
+        OnnxTensor idsTensor;
+        if (wantsInt32) {
+            int[] ids32 = new int[tokenIds.length];
+            for (int i = 0; i < tokenIds.length; i++) ids32[i] = (int) tokenIds[i];
+            idsTensor = OnnxTensor.createTensor(env, new int[][]{ids32});
+        } else {
+            idsTensor = OnnxTensor.createTensor(env, new long[][]{tokenIds});
+        }
+        Map<String, OnnxTensor> inputs = new HashMap<>();
+        inputs.put(inName, idsTensor);
+        try (OrtSession.Result r = session.run(inputs)) {
+            float[][][] raw = null;
+            for (Map.Entry<String, OnnxValue> entry : r) {
+                if (entry.getValue() instanceof OnnxTensor t) {
+                    Object v = t.getValue();
+                    if (v instanceof float[][][] a3) { raw = a3; break; }
+                }
+            }
+            if (raw == null) {
+                return new float[1][maxSeqLen][expectedDim]; // zeros fallback
+            }
+            // Pad or truncate to [1, maxSeqLen, expectedDim]
+            int srcSeq = raw[0].length;
+            int srcDim = raw[0][0].length;
+            float[][][] result = new float[1][maxSeqLen][expectedDim];
+            int copySeq = Math.min(srcSeq, maxSeqLen);
+            int copyDim = Math.min(srcDim, expectedDim);
+            for (int s = 0; s < copySeq; s++) {
+                System.arraycopy(raw[0][s], 0, result[0][s], 0, copyDim);
+            }
+            return result;
+        } finally {
+            idsTensor.close();
         }
     }
 
@@ -1975,6 +2427,176 @@ public class GenericOnnxService implements InferenceService {
                 map.put(bs.get(i), new String(Character.toChars(cs.get(i))));
             }
             return map;
+        }
+    }
+
+    /* ================================================================== */
+    /*  T5 (SentencePiece / Unigram) Tokenizer for T5-XXL                 */
+    /* ================================================================== */
+
+    /**
+     * Minimal Unigram (SentencePiece) tokenizer that reads a HuggingFace
+     * {@code tokenizer.json} file.  Supports the T5-XXL tokenizer used by
+     * Stable Diffusion 3.x.
+     *
+     * <p>Implements:
+     * <ul>
+     *   <li>NFKC normalisation</li>
+     *   <li>Metaspace pre-tokenisation (spaces → ▁)</li>
+     *   <li>Viterbi best-path segmentation over the Unigram log-prob
+     *       vocabulary</li>
+     *   <li>Special-token handling (pad / eos / unk)</li>
+     * </ul>
+     */
+    @SuppressWarnings("unchecked")
+    private static final class T5Tokenizer {
+
+        private final Map<String, Integer> pieceToId;
+        private final float[] scores;
+        private final int padId;
+        private final int eosId;
+        private final int unkId;
+        private final int maxPieceLen;
+
+        private T5Tokenizer(Map<String, Integer> pieceToId, float[] scores,
+                            int padId, int eosId, int unkId, int maxPieceLen) {
+            this.pieceToId = pieceToId;
+            this.scores    = scores;
+            this.padId     = padId;
+            this.eosId     = eosId;
+            this.unkId     = unkId;
+            this.maxPieceLen = maxPieceLen;
+        }
+
+        /**
+         * Load a T5 tokenizer from a HuggingFace {@code tokenizer.json}.
+         *
+         * Expected JSON structure (simplified):
+         * <pre>{
+         *   "model": {
+         *     "type": "Unigram",
+         *     "unk_id": 2,
+         *     "vocab": [ ["▁", -1.23], ["s", -2.34], … ]
+         *   },
+         *   "added_tokens": [ {"id": 0, "content": "<pad>"}, … ]
+         * }</pre>
+         */
+        static T5Tokenizer load(Path tokenizerJsonPath) throws Exception {
+            Map<String, Object> root = OBJECT_MAPPER.readValue(
+                    tokenizerJsonPath.toFile(), new TypeReference<>() {});
+            Map<String, Object> modelSection = (Map<String, Object>) root.get("model");
+            if (modelSection == null) {
+                throw new IllegalArgumentException("tokenizer.json has no 'model' section");
+            }
+            List<List<Object>> vocab = (List<List<Object>>) modelSection.get("vocab");
+            if (vocab == null || vocab.isEmpty()) {
+                throw new IllegalArgumentException("tokenizer.json model has no 'vocab'");
+            }
+
+            int unkIdFromModel = modelSection.get("unk_id") instanceof Number n ? n.intValue() : 2;
+
+            Map<String, Integer> pieceToId = new HashMap<>(vocab.size());
+            float[] scoreArr = new float[vocab.size()];
+            int maxLen = 1;
+            for (int i = 0; i < vocab.size(); i++) {
+                List<Object> entry = vocab.get(i);
+                String piece = (String) entry.get(0);
+                double score = entry.get(1) instanceof Number n ? n.doubleValue() : 0.0;
+                pieceToId.put(piece, i);
+                scoreArr[i] = (float) score;
+                if (piece.length() > maxLen) maxLen = piece.length();
+            }
+
+            // Detect special tokens from added_tokens or vocab
+            int padId = pieceToId.getOrDefault("<pad>", 0);
+            int eosId = pieceToId.getOrDefault("</s>", 1);
+
+            // Merge added_tokens (they may override or supplement vocab)
+            if (root.containsKey("added_tokens")) {
+                List<Map<String, Object>> addedTokens =
+                        (List<Map<String, Object>>) root.get("added_tokens");
+                for (Map<String, Object> at : addedTokens) {
+                    String content = (String) at.get("content");
+                    int id = at.get("id") instanceof Number n ? n.intValue() : -1;
+                    if (content != null && id >= 0) {
+                        pieceToId.put(content, id);
+                        if ("<pad>".equals(content)) padId = id;
+                        if ("</s>".equals(content))  eosId = id;
+                    }
+                }
+            }
+
+            return new T5Tokenizer(pieceToId, scoreArr, padId, eosId, unkIdFromModel, maxLen);
+        }
+
+        /**
+         * Encode {@code text} into token IDs, padded/truncated to {@code maxLength}.
+         * Mimics the HuggingFace T5 tokenizer: NFKC normalize → Metaspace
+         * pre-tokenize → Unigram Viterbi → append EOS → pad.
+         */
+        long[] encode(String text, int maxLength) {
+            String normalized = text == null ? "" : Normalizer.normalize(text, Normalizer.Form.NFKC);
+            // Metaspace pre-tokenization: prefix with ▁, replace spaces with ▁
+            String prepared = "\u2581" + normalized.replace(' ', '\u2581');
+
+            List<Integer> ids = viterbi(prepared);
+            ids.add(eosId);
+
+            long[] out = new long[maxLength];
+            Arrays.fill(out, padId);
+            for (int i = 0; i < Math.min(maxLength, ids.size()); i++) {
+                out[i] = ids.get(i);
+            }
+            return out;
+        }
+
+        /**
+         * Viterbi best-path segmentation.  For each position i in the string,
+         * find the best previous position j such that text[j..i] is a known
+         * piece and the total log-probability is maximised.
+         */
+        private List<Integer> viterbi(String text) {
+            int n = text.length();
+            float[] bestScore = new float[n + 1];
+            int[] bestEnd = new int[n + 1];      // best preceding boundary
+            int[] bestPieceId = new int[n + 1];   // piece ID for segment [bestEnd[i]..i)
+            Arrays.fill(bestScore, Float.NEGATIVE_INFINITY);
+            Arrays.fill(bestPieceId, unkId);
+            bestScore[0] = 0;
+
+            for (int i = 1; i <= n; i++) {
+                // Try all pieces ending at position i
+                int lo = Math.max(0, i - maxPieceLen);
+                for (int j = lo; j < i; j++) {
+                    String sub = text.substring(j, i);
+                    Integer id = pieceToId.get(sub);
+                    if (id != null) {
+                        float candidate = bestScore[j] + scores[id];
+                        if (candidate > bestScore[i]) {
+                            bestScore[i] = candidate;
+                            bestEnd[i] = j;
+                            bestPieceId[i] = id;
+                        }
+                    }
+                }
+                // If no piece matched, treat single char as unknown
+                if (bestScore[i] == Float.NEGATIVE_INFINITY) {
+                    bestScore[i] = bestScore[i - 1] + scores[unkId];
+                    bestEnd[i] = i - 1;
+                    bestPieceId[i] = unkId;
+                }
+            }
+
+            // Backtrack to recover the segmentation
+            List<Integer> ids = new ArrayList<>();
+            int pos = n;
+            while (pos > 0) {
+                ids.add(bestPieceId[pos]);
+                pos = bestEnd[pos];
+            }
+            // The list is in reverse order
+            java.util.Collections.reverse(ids);
+            return ids;
         }
     }
 

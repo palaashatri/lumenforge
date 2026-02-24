@@ -264,6 +264,7 @@ public class ModelManagerPanel extends JPanel {
                 + "Examples:\n"
                 + "  \u2022 runwayml/stable-diffusion-v1-5\n"
                 + "  \u2022 stabilityai/stable-diffusion-xl-base-1.0\n"
+                + "  \u2022 stabilityai/stable-diffusion-3.5-medium  (gated \u2014 needs HF token)\n"
                 + "  \u2022 CompVis/stable-diffusion-v1-4\n",
                 "Convert HuggingFace Model to ONNX",
                 JOptionPane.PLAIN_MESSAGE,
@@ -311,22 +312,43 @@ public class ModelManagerPanel extends JPanel {
             return;
         }
 
-        // 2. Determine output directory
+        // 2. Check if model is likely gated — prompt for HF token
+        String hfToken = null;
+        if (PyTorchToOnnxConverter.isLikelyGatedModel(modelId)) {
+            hfToken = (String) JOptionPane.showInputDialog(
+                    this,
+                    "'" + modelId + "' is a gated model that requires authentication.\n\n"
+                    + "Steps to get a HuggingFace token:\n"
+                    + "  1. Go to huggingface.co and sign in\n"
+                    + "  2. Accept the model's license on its model page\n"
+                    + "  3. Go to Settings \u2192 Access Tokens \u2192 Create new token\n\n"
+                    + "Paste your HuggingFace access token:",
+                    "Authentication Required",
+                    JOptionPane.PLAIN_MESSAGE,
+                    null, null, "");
+            if (hfToken == null || hfToken.isBlank()) {
+                statusLabel.setText("Conversion canceled \u2014 HuggingFace token is required for gated models.");
+                return;
+            }
+        }
+
+        // 3. Determine output directory
         String sanitized = modelId.replaceAll("[^a-zA-Z0-9._-]", "-").toLowerCase();
         Path outputDir = modelStorage.root().resolve("text-image").resolve("converted-" + sanitized);
 
-        // 3. Show progress
+        // 4. Show progress
         statusLabel.setText("Converting " + displayName + " to ONNX\u2026");
         progressBar.setVisible(true);
         progressBar.setIndeterminate(true);
 
-        // 4. Run on background thread
+        // 5. Run on background thread
         final String conversionMode = mode;
+        final String token = hfToken;
         CompletableFuture.supplyAsync(() -> {
             PyTorchToOnnxConverter converter = new PyTorchToOnnxConverter(
                     msg -> SwingUtilities.invokeLater(() -> statusLabel.setText(msg))
             );
-            return converter.convert(modelId, outputDir, conversionMode);
+            return converter.convert(modelId, outputDir, conversionMode, token);
         }).whenComplete((path, error) -> SwingUtilities.invokeLater(() -> {
             progressBar.setIndeterminate(false);
             progressBar.setVisible(false);
@@ -359,12 +381,16 @@ public class ModelManagerPanel extends JPanel {
      * and refresh the table so it appears immediately.
      */
     private void registerConvertedModel(String modelId, String sanitized, Path outputDir) {
-        // Determine the ONNX artifact path
+        // Determine the ONNX artifact path — SD 3.x uses transformer/, SD 1.x/SDXL uses unet/
+        Path transformerOnnx = outputDir.resolve("transformer").resolve("model.onnx");
         Path unetOnnx = outputDir.resolve("unet").resolve("model.onnx");
         Path genericOnnx = outputDir.resolve("model.onnx");
 
         String relativePath;
-        if (Files.exists(unetOnnx)) {
+        if (Files.exists(transformerOnnx)) {
+            // SD 3.x model (MMDiT transformer)
+            relativePath = "text-image/converted-" + sanitized + "/transformer/model.onnx";
+        } else if (Files.exists(unetOnnx)) {
             relativePath = "text-image/converted-" + sanitized + "/unet/model.onnx";
         } else if (Files.exists(genericOnnx)) {
             relativePath = "text-image/converted-" + sanitized + "/model.onnx";
