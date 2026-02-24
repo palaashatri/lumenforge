@@ -203,6 +203,9 @@ public class ModelManagerPanel extends JPanel {
                     tableModel.setAvailable(row, true);
                     tableModel.updateProgress(descriptor.id(), 100);
                     statusLabel.setText("Downloaded: " + path);
+                    if (onModelsUpdated != null) {
+                        onModelsUpdated.run();
+                    }
                 }));
     }
 
@@ -258,6 +261,9 @@ public class ModelManagerPanel extends JPanel {
             tableModel.setAvailable(row, true);
             tableModel.updateProgress(descriptor.id(), 100);
             statusLabel.setText("Imported: " + target);
+            if (onModelsUpdated != null) {
+                onModelsUpdated.run();
+            }
         } catch (IOException ex) {
             statusLabel.setText("Import failed: " + ex.getMessage());
         }
