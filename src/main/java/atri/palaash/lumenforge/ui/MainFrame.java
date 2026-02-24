@@ -55,7 +55,6 @@ public class MainFrame extends JFrame {
     private static final String CARD_IMG2IMG  = "Img2Img";
     private static final String CARD_UPSCALE  = "Upscale";
     private static final String CARD_MODELS   = "Models";
-    private static final String CARD_LOGS     = "Logs";
 
     private final CardLayout cardLayout = new CardLayout();
     private final JPanel contentPanel = new JPanel(cardLayout);
@@ -64,13 +63,11 @@ public class MainFrame extends JFrame {
     private final ImageUpscalePanel imageUpscalePanel;
     private final Img2ImgPanel img2ImgPanel;
     private final ModelManagerPanel modelManagerPanel;
-    private final LogsPanel logsPanel;
     private final JLabel statusBarLabel;
 
     /* Sidebar lists */
     private JList<String> workflowList;
     private JList<String> managementList;
-    private JList<String> diagnosticsList;
 
     /* GPU state (shared across panels via supplier) */
     private boolean gpuEnabled = true;
@@ -140,14 +137,11 @@ public class MainFrame extends JFrame {
                             .collect(Collectors.toList()));
         });
 
-        logsPanel = new LogsPanel();
-
-        /* ── Content cards ───────────────────────────────────────── */
+        /* ── Content cards ─────────────────────────────────────── */
         contentPanel.add(textToImagePanel, CARD_GENERATE);
         contentPanel.add(img2ImgPanel,     CARD_IMG2IMG);
         contentPanel.add(imageUpscalePanel, CARD_UPSCALE);
         contentPanel.add(modelManagerPanel, CARD_MODELS);
-        contentPanel.add(logsPanel,         CARD_LOGS);
 
         /* ── Sidebar ─────────────────────────────────────────────── */
         // Create both lists first, then wire listeners
@@ -165,33 +159,17 @@ public class MainFrame extends JFrame {
         managementList.setCellRenderer(new SidebarRenderer());
         managementList.setOpaque(false);
 
-        String[] diagnosticsItems = {CARD_LOGS};
-        diagnosticsList = new JList<>(diagnosticsItems);
-        diagnosticsList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        diagnosticsList.setFixedCellHeight(32);
-        diagnosticsList.setCellRenderer(new SidebarRenderer());
-        diagnosticsList.setOpaque(false);
-
         // Wire listeners after all lists exist
         workflowList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting() && workflowList.getSelectedIndex() >= 0) {
                 managementList.clearSelection();
-                diagnosticsList.clearSelection();
                 cardLayout.show(contentPanel, workflowList.getSelectedValue());
             }
         });
         managementList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting() && managementList.getSelectedIndex() >= 0) {
                 workflowList.clearSelection();
-                diagnosticsList.clearSelection();
                 cardLayout.show(contentPanel, managementList.getSelectedValue());
-            }
-        });
-        diagnosticsList.addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting() && diagnosticsList.getSelectedIndex() >= 0) {
-                workflowList.clearSelection();
-                managementList.clearSelection();
-                cardLayout.show(contentPanel, diagnosticsList.getSelectedValue());
             }
         });
 
@@ -237,29 +215,16 @@ public class MainFrame extends JFrame {
         managementList.setAlignmentX(Component.LEFT_ALIGNMENT);
         managementSection.add(managementList);
 
-        // Diagnostics section
-        JPanel diagnosticsSection = new JPanel();
-        diagnosticsSection.setLayout(new BoxLayout(diagnosticsSection, BoxLayout.Y_AXIS));
-        diagnosticsSection.setOpaque(false);
+        // Diagnostics section removed
 
-        JLabel diagnosticsHeader = new JLabel("DIAGNOSTICS");
-        diagnosticsHeader.setFont(diagnosticsHeader.getFont().deriveFont(Font.BOLD, 10f));
-        diagnosticsHeader.setForeground(UIManager.getColor("Label.disabledForeground"));
-        diagnosticsHeader.setBorder(BorderFactory.createEmptyBorder(8, 20, 4, 20));
-        diagnosticsHeader.setAlignmentX(Component.LEFT_ALIGNMENT);
-        diagnosticsSection.add(diagnosticsHeader);
-        diagnosticsList.setAlignmentX(Component.LEFT_ALIGNMENT);
-        diagnosticsSection.add(diagnosticsList);
-
-        // Bottom panel: management + diagnostics
+        // Bottom panel: management
         JPanel bottomSection = new JPanel();
         bottomSection.setLayout(new BoxLayout(bottomSection, BoxLayout.Y_AXIS));
         bottomSection.setOpaque(false);
         bottomSection.setBorder(BorderFactory.createEmptyBorder(0, 0, 12, 0));
         bottomSection.add(managementSection);
-        bottomSection.add(diagnosticsSection);
 
-        // Combine: workflow on top, management+diagnostics at bottom
+        // Combine: workflow on top, management at bottom
         JPanel sidebarContent = new JPanel(new BorderLayout());
         sidebarContent.setOpaque(false);
         sidebarContent.add(workflowSection, BorderLayout.NORTH);
@@ -333,11 +298,6 @@ public class MainFrame extends JFrame {
         showModels.addActionListener(e -> switchToCard(CARD_MODELS, managementList, 0));
         viewMenu.add(showModels);
 
-        JMenuItem showLogs = new JMenuItem("Logs");
-        showLogs.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_L, menuMask));
-        showLogs.addActionListener(e -> switchToCard(CARD_LOGS, diagnosticsList, 0));
-        viewMenu.add(showLogs);
-
         bar.add(viewMenu);
 
         /* Inference */
@@ -372,7 +332,6 @@ public class MainFrame extends JFrame {
         cardLayout.show(contentPanel, card);
         if (targetList != workflowList) workflowList.clearSelection();
         if (targetList != managementList) managementList.clearSelection();
-        if (targetList != diagnosticsList) diagnosticsList.clearSelection();
         targetList.setSelectedIndex(index);
     }
 
@@ -451,10 +410,8 @@ public class MainFrame extends JFrame {
         }
         int cores = Runtime.getRuntime().availableProcessors();
         long mem = Runtime.getRuntime().maxMemory() / (1024 * 1024);
-        String djl = atri.palaash.lumenforge.inference.DjlPyTorchService.isAvailable()
-                ? "  \u2502  DJL \u2713" : "";
         return "EP: " + ep + "  \u2502  Cores: " + cores + "  \u2502  Heap: " + mem
-                + " MB  \u2502  Java " + Runtime.version() + djl;
+                + " MB  \u2502  Java " + Runtime.version();
     }
 
     /* ================================================================== */
