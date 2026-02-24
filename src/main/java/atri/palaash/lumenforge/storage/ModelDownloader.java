@@ -2,6 +2,7 @@ package atri.palaash.lumenforge.storage;
 
 import atri.palaash.lumenforge.model.ModelDescriptor;
 import atri.palaash.lumenforge.model.TaskType;
+import atri.palaash.lumenforge.ui.AppLogger;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -56,6 +57,7 @@ public class ModelDownloader {
         return CompletableFuture.supplyAsync(() -> {
             Path target = storage.modelPath(descriptor);
             List<Path> writtenFiles = new ArrayList<>();
+            AppLogger.model("Download started: " + descriptor.displayName());
             try {
                 String downloadUrl = descriptor.sourceUrl();
                 if (!downloadUrl.toLowerCase(Locale.ROOT).contains(".onnx")
@@ -71,8 +73,12 @@ public class ModelDownloader {
                 downloadCompanionFilesIfNeeded(descriptor, target.getParent(), progressConsumer, writtenFiles);
                 downloadKnownBundleFiles(descriptor, progressConsumer, writtenFiles);
 
+                AppLogger.model("Download complete: " + descriptor.displayName()
+                        + " (" + writtenFiles.size() + " file(s))");
                 return target;
             } catch (Exception ex) {
+                AppLogger.modelError("Download failed: " + descriptor.displayName()
+                        + " — " + ex.getMessage());
                 for (Path written : writtenFiles) {
                     try {
                         Files.deleteIfExists(written);
@@ -227,6 +233,9 @@ public class ModelDownloader {
                 lastException = ex;
                 if (attempt < MAX_RETRIES) {
                     long backoff = 2000L * attempt;
+                    AppLogger.modelWarn("Download stalled/failed for " + target.getFileName()
+                            + ", retrying in " + (backoff / 1000) + "s (attempt "
+                            + (attempt + 1) + "/" + MAX_RETRIES + ")");
                     if (progressConsumer != null) {
                         progressConsumer.accept(new DownloadProgress(-1, -1,
                                 "Download stalled/failed, retrying in " + (backoff / 1000) + "s (attempt "

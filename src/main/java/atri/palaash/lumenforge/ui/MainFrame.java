@@ -55,6 +55,7 @@ public class MainFrame extends JFrame {
     private static final String CARD_IMG2IMG  = "Img2Img";
     private static final String CARD_UPSCALE  = "Upscale";
     private static final String CARD_MODELS   = "Models";
+    private static final String CARD_LOGS     = "Logs";
 
     private final CardLayout cardLayout = new CardLayout();
     private final JPanel contentPanel = new JPanel(cardLayout);
@@ -63,11 +64,13 @@ public class MainFrame extends JFrame {
     private final ImageUpscalePanel imageUpscalePanel;
     private final Img2ImgPanel img2ImgPanel;
     private final ModelManagerPanel modelManagerPanel;
+    private final LogsPanel logsPanel;
     private final JLabel statusBarLabel;
 
     /* Sidebar lists */
     private JList<String> workflowList;
     private JList<String> managementList;
+    private JList<String> diagnosticsList;
 
     /* GPU state (shared across panels via supplier) */
     private boolean gpuEnabled = true;
@@ -137,11 +140,14 @@ public class MainFrame extends JFrame {
                             .collect(Collectors.toList()));
         });
 
+        logsPanel = new LogsPanel();
+
         /* ── Content cards ───────────────────────────────────────── */
         contentPanel.add(textToImagePanel, CARD_GENERATE);
         contentPanel.add(img2ImgPanel,     CARD_IMG2IMG);
         contentPanel.add(imageUpscalePanel, CARD_UPSCALE);
         contentPanel.add(modelManagerPanel, CARD_MODELS);
+        contentPanel.add(logsPanel,         CARD_LOGS);
 
         /* ── Sidebar ─────────────────────────────────────────────── */
         // Create both lists first, then wire listeners
@@ -159,17 +165,33 @@ public class MainFrame extends JFrame {
         managementList.setCellRenderer(new SidebarRenderer());
         managementList.setOpaque(false);
 
-        // Wire listeners after both lists exist
+        String[] diagnosticsItems = {CARD_LOGS};
+        diagnosticsList = new JList<>(diagnosticsItems);
+        diagnosticsList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        diagnosticsList.setFixedCellHeight(32);
+        diagnosticsList.setCellRenderer(new SidebarRenderer());
+        diagnosticsList.setOpaque(false);
+
+        // Wire listeners after all lists exist
         workflowList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting() && workflowList.getSelectedIndex() >= 0) {
                 managementList.clearSelection();
+                diagnosticsList.clearSelection();
                 cardLayout.show(contentPanel, workflowList.getSelectedValue());
             }
         });
         managementList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting() && managementList.getSelectedIndex() >= 0) {
                 workflowList.clearSelection();
+                diagnosticsList.clearSelection();
                 cardLayout.show(contentPanel, managementList.getSelectedValue());
+            }
+        });
+        diagnosticsList.addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting() && diagnosticsList.getSelectedIndex() >= 0) {
+                workflowList.clearSelection();
+                managementList.clearSelection();
+                cardLayout.show(contentPanel, diagnosticsList.getSelectedValue());
             }
         });
 
@@ -201,7 +223,7 @@ public class MainFrame extends JFrame {
         workflowList.setAlignmentX(Component.LEFT_ALIGNMENT);
         workflowSection.add(workflowList);
 
-        // Management section (pinned to bottom)
+        // Management section
         JPanel managementSection = new JPanel();
         managementSection.setLayout(new BoxLayout(managementSection, BoxLayout.Y_AXIS));
         managementSection.setOpaque(false);
@@ -214,13 +236,34 @@ public class MainFrame extends JFrame {
         managementSection.add(managementHeader);
         managementList.setAlignmentX(Component.LEFT_ALIGNMENT);
         managementSection.add(managementList);
-        managementSection.setBorder(BorderFactory.createEmptyBorder(0, 0, 12, 0));
 
-        // Combine: workflow on top, management at bottom with glue between
+        // Diagnostics section
+        JPanel diagnosticsSection = new JPanel();
+        diagnosticsSection.setLayout(new BoxLayout(diagnosticsSection, BoxLayout.Y_AXIS));
+        diagnosticsSection.setOpaque(false);
+
+        JLabel diagnosticsHeader = new JLabel("DIAGNOSTICS");
+        diagnosticsHeader.setFont(diagnosticsHeader.getFont().deriveFont(Font.BOLD, 10f));
+        diagnosticsHeader.setForeground(UIManager.getColor("Label.disabledForeground"));
+        diagnosticsHeader.setBorder(BorderFactory.createEmptyBorder(8, 20, 4, 20));
+        diagnosticsHeader.setAlignmentX(Component.LEFT_ALIGNMENT);
+        diagnosticsSection.add(diagnosticsHeader);
+        diagnosticsList.setAlignmentX(Component.LEFT_ALIGNMENT);
+        diagnosticsSection.add(diagnosticsList);
+
+        // Bottom panel: management + diagnostics
+        JPanel bottomSection = new JPanel();
+        bottomSection.setLayout(new BoxLayout(bottomSection, BoxLayout.Y_AXIS));
+        bottomSection.setOpaque(false);
+        bottomSection.setBorder(BorderFactory.createEmptyBorder(0, 0, 12, 0));
+        bottomSection.add(managementSection);
+        bottomSection.add(diagnosticsSection);
+
+        // Combine: workflow on top, management+diagnostics at bottom
         JPanel sidebarContent = new JPanel(new BorderLayout());
         sidebarContent.setOpaque(false);
         sidebarContent.add(workflowSection, BorderLayout.NORTH);
-        sidebarContent.add(managementSection, BorderLayout.SOUTH);
+        sidebarContent.add(bottomSection, BorderLayout.SOUTH);
 
         sidebarPanel.add(sidebarContent, BorderLayout.CENTER);
 
@@ -290,6 +333,11 @@ public class MainFrame extends JFrame {
         showModels.addActionListener(e -> switchToCard(CARD_MODELS, managementList, 0));
         viewMenu.add(showModels);
 
+        JMenuItem showLogs = new JMenuItem("Logs");
+        showLogs.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_L, menuMask));
+        showLogs.addActionListener(e -> switchToCard(CARD_LOGS, diagnosticsList, 0));
+        viewMenu.add(showLogs);
+
         bar.add(viewMenu);
 
         /* Inference */
@@ -322,11 +370,9 @@ public class MainFrame extends JFrame {
 
     private void switchToCard(String card, JList<String> targetList, int index) {
         cardLayout.show(contentPanel, card);
-        if (targetList == workflowList) {
-            managementList.clearSelection();
-        } else {
-            workflowList.clearSelection();
-        }
+        if (targetList != workflowList) workflowList.clearSelection();
+        if (targetList != managementList) managementList.clearSelection();
+        if (targetList != diagnosticsList) diagnosticsList.clearSelection();
         targetList.setSelectedIndex(index);
     }
 

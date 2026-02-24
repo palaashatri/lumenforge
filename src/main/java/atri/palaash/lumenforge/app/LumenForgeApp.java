@@ -6,6 +6,7 @@ import atri.palaash.lumenforge.model.ModelRegistry;
 import atri.palaash.lumenforge.model.TaskType;
 import atri.palaash.lumenforge.storage.ModelDownloader;
 import atri.palaash.lumenforge.storage.ModelStorage;
+import atri.palaash.lumenforge.ui.AppLogger;
 import atri.palaash.lumenforge.ui.MainFrame;
 import atri.palaash.lumenforge.ui.NativeLookAndFeel;
 
@@ -21,6 +22,11 @@ public class LumenForgeApp {
 
     public static void main(String[] args) {
         configureDesktopIntegration();
+
+        AppLogger.app("LumenForge starting \u2014 Java " + Runtime.version()
+                + ", " + System.getProperty("os.name") + " " + System.getProperty("os.arch"));
+        AppLogger.app("Max heap: " + (Runtime.getRuntime().maxMemory() / (1024 * 1024)) + " MB"
+                + ", CPUs: " + Runtime.getRuntime().availableProcessors());
 
         ExecutorService workerPool = Executors.newVirtualThreadPerTaskExecutor();
         ModelStorage storage = new ModelStorage();

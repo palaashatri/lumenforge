@@ -10,6 +10,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import atri.palaash.lumenforge.model.TaskType;
 import atri.palaash.lumenforge.storage.ModelStorage;
+import atri.palaash.lumenforge.ui.AppLogger;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -71,10 +72,13 @@ public class GenericOnnxService implements InferenceService {
         String key = modelPath.toAbsolutePath().toString();
         OrtSession existing = SESSION_CACHE.get(key);
         if (existing != null) {
+            AppLogger.model("Session cache hit: " + modelPath.getFileName());
             return existing;
         }
+        AppLogger.model("Loading ONNX session: " + modelPath.getFileName());
         OrtSession session = env.createSession(modelPath.toString(), opts);
         SESSION_CACHE.put(key, session);
+        AppLogger.model("Session loaded: " + modelPath.getFileName());
         return session;
     }
 
@@ -126,10 +130,13 @@ public class GenericOnnxService implements InferenceService {
     public CompletableFuture<InferenceResult> run(InferenceRequest request) {
         return CompletableFuture.supplyAsync(() -> {
             if (!storage.isAvailable(request.model())) {
+                AppLogger.modelError("Model not found locally: " + request.model().displayName());
                 return InferenceResult.fail("Model not found locally. Open Model Manager from the menu bar and download it first.");
             }
 
             Path modelPath = storage.modelPath(request.model());
+            AppLogger.model("Starting inference: " + request.model().displayName()
+                    + " (" + request.model().id() + ")");
 
             // Temporarily intercept stderr so ONNX Runtime native warnings
             // appear in the application's Log tab instead of only in the console.
@@ -146,6 +153,8 @@ public class GenericOnnxService implements InferenceService {
                 sessionOptions.setIntraOpNumThreads(Math.max(1, cpus - 1));
                 sessionOptions.setInterOpNumThreads(Math.max(1, Math.min(cpus / 2, 4)));
                 ProviderSelection providerSelection = configureExecutionProvider(sessionOptions, request.preferGpu());
+                AppLogger.model("Using EP: " + providerSelection.provider()
+                        + (providerSelection.notes().isBlank() ? "" : " (" + providerSelection.notes() + ")"));
 
                 // Invalidate session cache when the execution provider changes.
                 String epKey = providerSelection.provider() + "|" + request.preferGpu();
@@ -192,9 +201,11 @@ public class GenericOnnxService implements InferenceService {
                         + request.model().displayName() + " | task=" + taskType.displayName()
                         + " | EP=" + providerSelection.provider()
                         + providerSelection.noteSuffix();
+                AppLogger.modelWarn(details);
                 return InferenceResult.fail(details);
             } catch (OrtException ex) {
                 String message = ex.getMessage() == null ? "Unknown ONNX Runtime error" : ex.getMessage();
+                AppLogger.modelError("ONNX Runtime error: " + message);
                 if (message.contains("NhwcConv")) {
                     return InferenceResult.fail(
                             "This ONNX model uses custom ops (e.g., NhwcConv) not available in CPUExecutionProvider. "
@@ -2644,27 +2655,59 @@ public class GenericOnnxService implements InferenceService {
         }
 
         StringBuilder notes = new StringBuilder();
-        System.out.println("[LumenForge] EP preference order: " + preference);
+        List<String> failReasons = new ArrayList<>();
+        AppLogger.app("EP preference order: " + preference
+                + "  (os=" + os + ", arch=" + arch + ")");
+
+        if (!preferGpu) {
+            AppLogger.app("GPU not requested for this session — using CPUExecutionProvider");
+            return new ProviderSelection("CPUExecutionProvider", "GPU not requested");
+        }
 
         for (String candidate : preference) {
             if ("cpu".equals(candidate)) {
-                System.out.println("[LumenForge] Using CPUExecutionProvider");
+                // All GPU EPs exhausted — log summary
+                AppLogger.appWarn("Falling back to CPUExecutionProvider");
+                if (!failReasons.isEmpty()) {
+                    AppLogger.appWarn("Reason: every GPU execution provider was unavailable:");
+                    for (String reason : failReasons) {
+                        AppLogger.appWarn("  - " + reason);
+                    }
+                    AppLogger.appWarn("Tip: install the matching GPU runtime "
+                            + "(e.g. CUDA/cuDNN for NVIDIA, ROCm for AMD) or use "
+                            + "-Dlumenforge.ep=<provider> to force a specific EP.");
+                }
                 return new ProviderSelection("CPUExecutionProvider", notes.toString());
             }
-            if (tryEnableProvider(options, candidate, notes)) {
+            String failReason = tryEnableProvider(options, candidate, notes);
+            if (failReason == null) {
                 String display = providerDisplayName(candidate);
-                System.out.println("[LumenForge] \u2713 Enabled " + display);
+                AppLogger.app("\u2713 Enabled " + display);
                 return new ProviderSelection(display, notes.toString());
             }
+            failReasons.add(failReason);
         }
-        System.out.println("[LumenForge] No GPU EP available, falling back to CPU");
+        // Preference list didn't include "cpu" explicitly — shouldn't happen, but handle it
+        AppLogger.appWarn("No EP available, falling back to CPUExecutionProvider");
+        if (!failReasons.isEmpty()) {
+            AppLogger.appWarn("Reasons:");
+            for (String reason : failReasons) {
+                AppLogger.appWarn("  - " + reason);
+            }
+        }
         return new ProviderSelection("CPUExecutionProvider", notes.toString());
     }
 
-    private boolean tryEnableProvider(OrtSession.SessionOptions options, String candidate, StringBuilder notes) {
-        boolean ok = false;
+    /**
+     * Attempt to enable a single EP via reflection.
+     *
+     * @return {@code null} if the provider was enabled successfully,
+     *         or a human-readable reason string if it could not be enabled.
+     */
+    private String tryEnableProvider(OrtSession.SessionOptions options, String candidate, StringBuilder notes) {
+        String failDetail = null;
         try {
-            ok = switch (candidate) {
+            boolean ok = switch (candidate) {
 
                 /* ── NVIDIA ───────────────────────────────────────────── */
                 case "tensorrt_rtx" ->
@@ -2708,16 +2751,21 @@ public class GenericOnnxService implements InferenceService {
 
                 default -> false;
             };
+            if (!ok) {
+                failDetail = candidate + ": native library not found in classpath";
+            }
         } catch (Exception ex) {
-            ok = false;
+            String msg = ex.getMessage();
+            if (msg == null && ex.getCause() != null) { msg = ex.getCause().getMessage(); }
+            failDetail = candidate + ": " + (msg != null ? msg : ex.getClass().getSimpleName());
         }
 
-        if (!ok) {
+        if (failDetail != null) {
             if (!notes.isEmpty()) { notes.append("; "); }
             notes.append(candidate).append(" not available");
-            System.out.println("[LumenForge]   \u2717 " + candidate + " not available");
+            AppLogger.appWarn("\u2717 " + failDetail);
         }
-        return ok;
+        return failDetail;
     }
 
     /* ── Reflection helpers for EP registration ──────────────────────── */
