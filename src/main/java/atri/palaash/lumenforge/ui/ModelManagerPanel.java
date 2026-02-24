@@ -44,7 +44,6 @@ public class ModelManagerPanel extends JPanel {
     private final JLabel statusLabel;
     private final JProgressBar progressBar;
     private final JTable table;
-    private final Set<String> promptedForConversion = new HashSet<>();
     private Runnable onModelsUpdated;
 
     public ModelManagerPanel(ModelRegistry modelRegistry, ModelStorage modelStorage, ModelDownloader modelDownloader) {
@@ -88,33 +87,27 @@ public class ModelManagerPanel extends JPanel {
                 return;
             }
             ModelDescriptor descriptor = tableModel.modelAt(row);
-            startDownload(descriptor, row);
+            if (isPyTorchModel(descriptor)) {
+                handlePyTorchDownload(descriptor, row);
+            } else {
+                startDownload(descriptor, row);
+            }
         });
 
-        JButton convertButton = new JButton("Convert to ONNX");
-        convertButton.setPreferredSize(new Dimension(160, 32));
-        convertButton.setToolTipText("Convert a PyTorch / HuggingFace model to ONNX format");
-        convertButton.addActionListener(e -> handleConvertToOnnx());
-
-        /* Prompt the user when they select a PyTorch model row */
+        /* Show hint when a PyTorch model row is selected */
         table.getSelectionModel().addListSelectionListener(e -> {
             if (e.getValueIsAdjusting()) return;
             int row = table.getSelectedRow();
             if (row < 0) return;
             ModelDescriptor desc = tableModel.modelAt(row);
-            if (PyTorchToOnnxConverter.isPyTorchModel(desc.id())
-                    || PyTorchToOnnxConverter.isPyTorchModel(desc.relativePath())) {
-                statusLabel.setText("\u2139 This is a PyTorch model — click 'Convert to ONNX' to create an ONNX version.");
-                if (promptedForConversion.add(desc.id())) {
-                    SwingUtilities.invokeLater(() -> offerConversion(desc));
-                }
+            if (isPyTorchModel(desc)) {
+                statusLabel.setText("This is a PyTorch model - clicking Download will convert it to ONNX.");
             }
         });
 
         JPanel top = new JPanel(new BorderLayout(8, 8));
         top.add(refreshButton, BorderLayout.WEST);
         JPanel rightActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
-        rightActions.add(convertButton);
         rightActions.add(importButton);
         rightActions.add(downloadButton);
         top.add(rightActions, BorderLayout.EAST);
@@ -135,8 +128,41 @@ public class ModelManagerPanel extends JPanel {
         statusLabel.setText("Availability refreshed. Root: " + modelStorage.root());
     }
 
+    /**
+     * Check whether a model descriptor represents a PyTorch-only model
+     * that requires conversion to ONNX.
+     */
+    private static boolean isPyTorchModel(ModelDescriptor desc) {
+        return desc.sourceUrl().startsWith("hf-pytorch://")
+                || PyTorchToOnnxConverter.isPyTorchModel(desc.id())
+                || PyTorchToOnnxConverter.isPyTorchModel(desc.relativePath());
+    }
+
+    /**
+     * Handle download of a PyTorch model: confirm with user, then convert to ONNX.
+     */
+    private void handlePyTorchDownload(ModelDescriptor descriptor, int row) {
+        String modelId = descriptor.sourceUrl().startsWith("hf-pytorch://")
+                ? descriptor.sourceUrl().substring("hf-pytorch://".length())
+                : descriptor.id();
+
+        int choice = JOptionPane.showConfirmDialog(this,
+                "\"" + descriptor.displayName() + "\" is a PyTorch model.\n\n"
+                + "LumenForge will automatically convert it to ONNX format\n"
+                + "so it can run with the ONNX Runtime engine.\n\n"
+                + "This requires Python 3 (dependencies are installed automatically).\n"
+                + "The conversion may take several minutes.\n\n"
+                + "Proceed with download and conversion?",
+                "Convert PyTorch to ONNX",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+        if (choice == JOptionPane.YES_OPTION) {
+            startConversion(modelId, descriptor.displayName(), "diffusers");
+        }
+    }
+
     public void refreshModelsFromHuggingFace() {
-        statusLabel.setText("Refreshing Hugging Face ONNX text→image models...");
+        statusLabel.setText("Refreshing models from Hugging Face (ONNX + PyTorch)...");
         progressBar.setVisible(true);
         progressBar.setIndeterminate(true);
         modelDownloader.discoverTextToImageModels()
@@ -238,59 +264,6 @@ public class ModelManagerPanel extends JPanel {
     }
 
     /* ── PyTorch → ONNX conversion ───────────────────────────────────── */
-
-    /**
-     * Handle the "Convert to ONNX" button click:
-     * if the selected model is PyTorch → convert that model,
-     * otherwise → ask the user for a HuggingFace model ID.
-     */
-    private void handleConvertToOnnx() {
-        int row = table.getSelectedRow();
-        if (row >= 0) {
-            ModelDescriptor selected = tableModel.modelAt(row);
-            if (PyTorchToOnnxConverter.isPyTorchModel(selected.id())
-                    || PyTorchToOnnxConverter.isPyTorchModel(selected.relativePath())) {
-                String modelId = selected.sourceUrl().isBlank()
-                        ? selected.id() : selected.sourceUrl();
-                startConversion(modelId, selected.displayName(), "diffusers");
-                return;
-            }
-        }
-
-        // No PyTorch model selected — ask for a HuggingFace model ID
-        String modelId = (String) JOptionPane.showInputDialog(
-                this,
-                "Enter a HuggingFace model ID to convert to ONNX:\n\n"
-                + "Examples:\n"
-                + "  \u2022 runwayml/stable-diffusion-v1-5\n"
-                + "  \u2022 stabilityai/stable-diffusion-xl-base-1.0\n"
-                + "  \u2022 stabilityai/stable-diffusion-3.5-medium  (gated \u2014 needs HF token)\n"
-                + "  \u2022 CompVis/stable-diffusion-v1-4\n",
-                "Convert HuggingFace Model to ONNX",
-                JOptionPane.PLAIN_MESSAGE,
-                null, null, "");
-        if (modelId != null && !modelId.isBlank()) {
-            startConversion(modelId.trim(), modelId.trim(), "diffusers");
-        }
-    }
-
-    /**
-     * Offer conversion when the user selects a PyTorch model row (once per model).
-     */
-    private void offerConversion(ModelDescriptor desc) {
-        int choice = JOptionPane.showConfirmDialog(this,
-                "\"" + desc.displayName() + "\" is a PyTorch model.\n\n"
-                + "Would you like to convert it to ONNX format\n"
-                + "for use with LumenForge's ONNX Runtime engine?\n\n"
-                + "(Requires Python 3 — dependencies are installed automatically)",
-                "Convert to ONNX?",
-                JOptionPane.YES_NO_OPTION,
-                JOptionPane.QUESTION_MESSAGE);
-        if (choice == JOptionPane.YES_OPTION) {
-            String modelId = desc.sourceUrl().isBlank() ? desc.id() : desc.sourceUrl();
-            startConversion(modelId, desc.displayName(), "diffusers");
-        }
-    }
 
     /**
      * Launch the full conversion pipeline on a background thread.

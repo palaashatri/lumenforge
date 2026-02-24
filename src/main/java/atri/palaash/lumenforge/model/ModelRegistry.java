@@ -34,14 +34,20 @@ public class ModelRegistry {
         for (ModelDescriptor descriptor : allModels()) {
             knownIds.add(descriptor.id());
         }
-        List<ModelDescriptor> taskModels = byTask.computeIfAbsent(TaskType.TEXT_TO_IMAGE, ignored -> new ArrayList<>());
         int added = 0;
         for (ModelDescriptor descriptor : discovered) {
             if (knownIds.add(descriptor.id())) {
                 downloadableAssets.add(descriptor);
+                // Also add to the appropriate task list so it shows in workflow combos
                 if (descriptor.taskType() == TaskType.TEXT_TO_IMAGE
-                        && descriptor.relativePath().endsWith("unet/model.onnx")) {
-                    taskModels.add(descriptor);
+                        && (descriptor.relativePath().contains("unet/model.onnx")
+                            || descriptor.relativePath().contains("transformer/model.onnx")
+                            || descriptor.sourceUrl().startsWith("hf-pytorch://"))) {
+                    byTask.computeIfAbsent(TaskType.TEXT_TO_IMAGE, ignored -> new ArrayList<>())
+                          .add(descriptor);
+                } else if (descriptor.taskType() == TaskType.IMAGE_UPSCALE) {
+                    byTask.computeIfAbsent(TaskType.IMAGE_UPSCALE, ignored -> new ArrayList<>())
+                          .add(descriptor);
                 }
                 added++;
             }

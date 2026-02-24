@@ -42,7 +42,7 @@ public class ModelDownloader {
 
     public boolean canDownload(ModelDescriptor descriptor) {
         String url = descriptor.sourceUrl();
-        return url.contains(".onnx") || url.contains("/resolve/");
+        return url.contains(".onnx") || url.contains("/resolve/") || url.startsWith("hf-pytorch://");
     }
 
     public CompletableFuture<Path> downloadIfMissing(ModelDescriptor descriptor, Consumer<DownloadProgress> progressConsumer) {
@@ -392,27 +392,69 @@ public class ModelDownloader {
                 for (String modelId : modelIds) {
                     String detailUrl = "https://huggingface.co/api/models/" + modelId;
                     String details = httpGetText(detailUrl);
-                    if (details.isBlank() || !details.contains("unet/model.onnx")) {
-                        continue;
+                    if (details.isBlank()) continue;
+
+                    boolean isGated = details.contains("\"gated\"") &&
+                            (details.contains("\"gated\":true") || details.contains("\"gated\":\"auto\"")
+                            || details.contains("\"gated\": true") || details.contains("\"gated\": \"auto\""));
+
+                    // ── Determine model type and create descriptor ──
+                    boolean hasOnnxUnet = details.contains("unet/model.onnx");
+                    boolean hasOnnxTransformer = details.contains("transformer/model.onnx");
+                    boolean hasEsrgan = modelId.toLowerCase(Locale.ROOT).contains("esrgan")
+                            || modelId.toLowerCase(Locale.ROOT).contains("realesrgan")
+                            || modelId.toLowerCase(Locale.ROOT).contains("upscal");
+                    boolean hasPyTorch = details.contains("model_index.json")
+                            || details.contains("diffusion_pytorch_model")
+                            || details.contains(".safetensors")
+                            || details.contains("\"pipeline_tag\":\"text-to-image\"");
+                    // Don't mark as PyTorch if it already has ONNX artifacts
+                    boolean isPyTorchOnly = hasPyTorch && !hasOnnxUnet && !hasOnnxTransformer;
+
+                    if (hasEsrgan) {
+                        // ESRGAN upscaler — check for .onnx file
+                        boolean hasOnnx = details.contains(".onnx");
+                        if (!hasOnnx && !isGated) continue;
+                        String onnxFile = findEsrganOnnxFile(details);
+                        if (onnxFile == null) onnxFile = "onnx/model.onnx"; // common path
+                        String sourceUrl = "https://huggingface.co/" + modelId + "/resolve/main/" + onnxFile;
+                        String id = "hf_" + modelId.toLowerCase(Locale.ROOT).replace('/', '_').replace('-', '_');
+                        String relativePath = "text-image/huggingface/" + modelId.replace('/', '-') + "/" + onnxFile;
+                        discovered.add(new ModelDescriptor(id,
+                                "HF: " + modelId + " (ESRGAN ONNX)",
+                                TaskType.IMAGE_UPSCALE, relativePath, sourceUrl,
+                                "Discovered ESRGAN/upscaler from Hugging Face."));
+                    } else if (hasOnnxUnet && !isGated) {
+                        // ONNX SD model with UNet
+                        String sourceUrl = "https://huggingface.co/" + modelId + "/resolve/main/unet/model.onnx";
+                        if (!urlLooksAccessible(sourceUrl)) continue;
+                        String id = "hf_" + modelId.toLowerCase(Locale.ROOT).replace('/', '_').replace('-', '_');
+                        String displayName = "HF: " + modelId + " (UNet ONNX)";
+                        String relativePath = "text-image/huggingface/" + modelId.replace('/', '-') + "/unet/model.onnx";
+                        discovered.add(new ModelDescriptor(id, displayName,
+                                TaskType.TEXT_TO_IMAGE, relativePath, sourceUrl,
+                                "Discovered from Hugging Face ONNX listing."));
+                    } else if (hasOnnxTransformer && !isGated) {
+                        // ONNX SD3-type model with transformer
+                        String sourceUrl = "https://huggingface.co/" + modelId + "/resolve/main/transformer/model.onnx";
+                        String id = "hf_" + modelId.toLowerCase(Locale.ROOT).replace('/', '_').replace('-', '_');
+                        String displayName = "HF: " + modelId + " (Transformer ONNX)";
+                        String relativePath = "text-image/huggingface/" + modelId.replace('/', '-') + "/transformer/model.onnx";
+                        discovered.add(new ModelDescriptor(id, displayName,
+                                TaskType.TEXT_TO_IMAGE, relativePath, sourceUrl,
+                                "Discovered SD 3.x-style ONNX model from Hugging Face."));
+                    } else if (isPyTorchOnly) {
+                        // PyTorch model — needs conversion to ONNX
+                        String sourceUrl = "hf-pytorch://" + modelId;
+                        String id = "hf_pt_" + modelId.toLowerCase(Locale.ROOT).replace('/', '_').replace('-', '_');
+                        String gatedNote = isGated ? " 🔒" : "";
+                        String displayName = "HF: " + modelId + " (PyTorch → convert)" + gatedNote;
+                        String relativePath = "text-image/converted-" + modelId.replace('/', '-').toLowerCase() + "/unet/model.onnx";
+                        discovered.add(new ModelDescriptor(id, displayName,
+                                TaskType.TEXT_TO_IMAGE, relativePath, sourceUrl,
+                                "PyTorch model — will be converted to ONNX on download."
+                                + (isGated ? " Gated model — requires HF token." : "")));
                     }
-                    if (details.contains("\"gated\":true")) {
-                        continue;
-                    }
-                    String sourceUrl = "https://huggingface.co/" + modelId + "/resolve/main/unet/model.onnx";
-                    if (!urlLooksAccessible(sourceUrl)) {
-                        continue;
-                    }
-                    String id = "hf_" + modelId.toLowerCase(Locale.ROOT).replace('/', '_').replace('-', '_');
-                    String displayName = "HF: " + modelId + " (UNet ONNX)";
-                    String relativePath = "text-image/huggingface/" + modelId.replace('/', '-') + "/unet/model.onnx";
-                    discovered.add(new ModelDescriptor(
-                            id,
-                            displayName,
-                            TaskType.TEXT_TO_IMAGE,
-                            relativePath,
-                            sourceUrl,
-                            "Discovered from Hugging Face text-to-image ONNX listing."
-                    ));
                 }
                 return discovered;
             } catch (Exception ex) {
@@ -421,9 +463,33 @@ public class ModelDownloader {
         }, executor);
     }
 
+    /**
+     * Try to find the ONNX file path in an ESRGAN repo's file listing.
+     */
+    private String findEsrganOnnxFile(String detailsJson) {
+        Matcher m = HF_RFILENAME_PATTERN.matcher(detailsJson);
+        while (m.find()) {
+            String f = m.group(1);
+            if (f.endsWith(".onnx")) return f;
+        }
+        return null;
+    }
+
     private Set<String> fetchCandidateModelIds() throws IOException, InterruptedException {
         Set<String> ids = new LinkedHashSet<>();
-        List<String> queries = List.of("text-to-image onnx", "stable diffusion onnx", "onnxruntime sd");
+        List<String> queries = List.of(
+                "text-to-image onnx",
+                "stable diffusion onnx",
+                "onnxruntime sd",
+                "stable-diffusion pytorch",
+                "stable-diffusion-xl",
+                "stable-diffusion-3",
+                "stable-diffusion v1",
+                "realesrgan onnx",
+                "esrgan onnx",
+                "real-esrgan",
+                "image super resolution onnx"
+        );
         for (String query : queries) {
             String searchUrl = "https://huggingface.co/api/models?search=" +
                     java.net.URLEncoder.encode(query, java.nio.charset.StandardCharsets.UTF_8) +
