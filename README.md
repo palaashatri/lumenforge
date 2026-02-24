@@ -1,66 +1,117 @@
 # LumenForge
 
-Desktop Java Swing application for Java-native ONNX Runtime workflows with automatic GPU/CPU provider fallback.
+[![Build LumenForge](https://github.com/palaashatri/lumenforge/actions/workflows/build.yml/badge.svg)](https://github.com/palaashatri/lumenforge/actions/workflows/build.yml)
 
-- Text → Image: Stable Diffusion v1.5 UNet + Real-ESRGAN with fully automatic downloads
+Desktop Java Swing application for ONNX Runtime inference with intelligent GPU acceleration across NVIDIA, Apple, Intel, and AMD hardware.
 
 <img width="2552" height="2026" alt="image" src="https://github.com/user-attachments/assets/8b7a8783-c795-4a2f-844c-beccc9d6855d" />
 
-
 ## Features
 
-- Native look-and-feel handling:
-  - macOS: system-native look-and-feel
-  - Windows/Linux: FlatLaf with automatic system dark/light detection
-- High-performance async execution using virtual threads
-- Model downloader module with progress reporting
-- Auto-download when a selected model is missing in task tabs
-- Model Manager downloads only on explicit **Download / Redownload** button click
-- Model Manager includes additional ONNX pipeline assets (UNet/Text Encoder/VAE/Safety Checker) for one-click download
-- Manual ONNX model import per selected row in Model Manager
-- Prompt library: saved presets + tags + search
+### Image Generation
+- **Text → Image**: Stable Diffusion v1.5, SD Turbo, SDXL Turbo, SDXL Base 1.0, SD 3.5 (MMDiT)
+- **Image → Image**: Img2Img with adjustable strength + inpainting
+- **Image Upscaling**: Real-ESRGAN 4× super-resolution with before/after preview
+- **Prompt library**: saved presets, tags, and search
 - Negative prompts + prompt weighting
-- Seed control + reproducibility presets
-- Batch generation settings (N images per prompt)
+- Seed control + reproducibility
+- Batch generation (N images per prompt)
 - Aspect ratio presets + custom size fields
-- Upscale toggle (Real-ESRGAN) with before/after preview (UI wiring)
 - Style presets (cinematic, sketch, product, etc.)
 - History gallery with metadata (seed, model, settings)
 - Export pipeline logs for debugging
+
+### SD 3.5 Support
+- MMDiT transformer architecture with Flow Matching Euler scheduler
+- Triple text encoding: CLIP-L (768d) + CLIP-G (1280d) + T5-XXL (4096d)
+- Built-in T5 tokenizer (SentencePiece/Unigram with Viterbi segmentation)
+- 16-channel latent space
+
+### Model Management
+- **Automatic HuggingFace discovery**: finds ONNX and PyTorch Stable Diffusion + ESRGAN models
+- **One-click download** with resume, retry, and stall detection
+- **PyTorch → ONNX auto-conversion**: downloading a PyTorch model triggers automatic conversion via managed Python venv
+- Manual ONNX model import
+- Gated model support with HuggingFace token authentication
 - Local model storage in `~/.lumenforge-models`
-- Execution provider fallback by OS:
-  - macOS: CoreML → CPU
-  - Windows: DirectML → CUDA → CPU
-  - Linux: CUDA → ROCm → CPU
 
-## Build
+### GPU Acceleration
+Intelligent execution provider selection — LumenForge probes available EPs at runtime and picks the best one:
+
+| Platform | Priority (highest → lowest) |
+|---|---|
+| **macOS** | CoreML (GPU + ANE + CPU) → CPU |
+| **Windows** | TensorRT-RTX → TensorRT → CUDA → DirectML → OpenVINO → CPU |
+| **Linux** | TensorRT → CUDA → ROCm → OpenVINO → CPU |
+
+Override with `-Dlumenforge.ep=cuda` (or any EP key) to force a specific provider.
+
+### UI
+- Native look-and-feel: system-native on macOS, FlatLaf with dark/light detection on Windows/Linux
+- High-performance async execution using virtual threads
+- Per-step progress with timing and ETA
+- Session and tokenizer caching for fast repeated inference
+
+## Downloads
+
+Pre-built fat JARs are available from [GitHub Releases](https://github.com/palaashatri/lumenforge/releases):
+
+| JAR | GPU Support | Use When |
+|---|---|---|
+| `lumenforge-universal.jar` | macOS CoreML (M-series GPU/ANE), CPU everywhere | macOS, or Windows/Linux without NVIDIA GPU |
+| `lumenforge-nvidia.jar` | CUDA + TensorRT (Windows/Linux) | Windows/Linux with NVIDIA GPU + CUDA installed |
+
+> **Note**: DirectML (AMD/Intel on Windows), OpenVINO (Intel), and ROCm (AMD on Linux) are auto-detected at runtime if the native libraries are installed on the system. The universal JAR handles this automatically.
 
 ```bash
-mvn -DskipTests compile
+# Run any variant
+java -jar lumenforge-universal.jar
+java -jar lumenforge-nvidia.jar
 ```
 
-Enable GPU runtime artifact (Windows/Linux):
+## Build from Source
+
+Requires **Java 21+** and **Maven 3.8+**.
 
 ```bash
-mvn -Donnx.gpu=true -DskipTests compile
+# Universal build (CPU + CoreML)
+mvn clean package -DskipTests
+
+# NVIDIA GPU build (CUDA + TensorRT)
+mvn clean package -DskipTests -Dort.artifactId=onnxruntime_gpu
+
+# Force CPU-only
+mvn clean package -DskipTests -Dort.artifactId=onnxruntime
 ```
 
-## Run
+### Run from source
 
 ```bash
-mvn exec:java
+mvn clean compile exec:java
 ```
 
-## Test
+### Run tests
 
 ```bash
 mvn clean test
 ```
 
+## CI / CD
+
+GitHub Actions builds both JAR variants on every push to `main` and PR. Pushing a version tag (e.g. `v1.0.0`) creates a GitHub Release with both JARs attached.
+
+See [.github/workflows/build.yml](.github/workflows/build.yml) for details.
+
+## Requirements
+
+- **Java 21** or later
+- **macOS 10.15+** for CoreML acceleration (M-series recommended)
+- **CUDA 12 + cuDNN** for NVIDIA GPU acceleration (RTX 30xx+ recommended)
+- **Python 3.8+** (optional) for PyTorch → ONNX model conversion
+
 ## Notes
 
-- Runtime is Java-only ONNX Runtime execution with GPU fallback (no Python bridge).
-- Override provider order via JVM property: `-Dlumenforge.ep=cpu|coreml|directml|cuda|rocm`.
-- Task tabs show preview images when an output artifact is generated, with **Open Output** to launch the file.
-- SD Turbo UNet remains experimental and may fail on CPU-only environments.
+- Runtime is pure Java — ONNX Runtime execution with GPU fallback. No Python bridge needed at inference time.
+- Override EP order via JVM property: `-Dlumenforge.ep=cpu|coreml|cuda|tensorrt|directml|openvino|rocm`
+- Task tabs show preview images when output is generated, with **Open Output** to launch the file.
 - If a model requires external tensor files (e.g. `weights.pb`), import the complete ONNX bundle into the model directory.

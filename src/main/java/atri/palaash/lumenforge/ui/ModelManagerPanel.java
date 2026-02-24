@@ -203,6 +203,9 @@ public class ModelManagerPanel extends JPanel {
                     tableModel.setAvailable(row, true);
                     tableModel.updateProgress(descriptor.id(), 100);
                     statusLabel.setText("Downloaded: " + path);
+                    if (onModelsUpdated != null) {
+                        onModelsUpdated.run();
+                    }
                 }));
     }
 
@@ -258,7 +261,12 @@ public class ModelManagerPanel extends JPanel {
             tableModel.setAvailable(row, true);
             tableModel.updateProgress(descriptor.id(), 100);
             statusLabel.setText("Imported: " + target);
+            System.out.println("[LumenForge] Model imported: " + descriptor.displayName() + " from " + source);
+            if (onModelsUpdated != null) {
+                onModelsUpdated.run();
+            }
         } catch (IOException ex) {
+            System.out.println("[LumenForge] ERROR: Import failed for " + descriptor.displayName() + ": " + ex.getMessage());
             statusLabel.setText("Import failed: " + ex.getMessage());
         }
     }
@@ -313,6 +321,7 @@ public class ModelManagerPanel extends JPanel {
         statusLabel.setText("Converting " + displayName + " to ONNX\u2026");
         progressBar.setVisible(true);
         progressBar.setIndeterminate(true);
+        System.out.println("[LumenForge] Starting PyTorch \u2192 ONNX conversion: " + modelId);
 
         // 5. Run on background thread
         final String conversionMode = mode;
@@ -337,6 +346,7 @@ public class ModelManagerPanel extends JPanel {
                         PyTorchToOnnxConverter.openPythonDownloadPage();
                     }
                 } else {
+                    System.out.println("[LumenForge] ERROR: Conversion failed for " + modelId + ": " + cause.getMessage());
                     statusLabel.setText("Conversion failed: " + cause.getMessage());
                     JOptionPane.showMessageDialog(this,
                             "Conversion failed:\n" + cause.getMessage(),
@@ -385,6 +395,7 @@ public class ModelManagerPanel extends JPanel {
         modelRegistry.mergeDownloadableAssets(List.of(desc));
         refreshTable();
         statusLabel.setText("\u2713 Converted and registered: " + modelId);
+        System.out.println("[LumenForge] Conversion complete: " + modelId + " \u2192 " + relativePath);
         if (onModelsUpdated != null) {
             onModelsUpdated.run();
         }

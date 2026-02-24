@@ -137,7 +137,7 @@ public class MainFrame extends JFrame {
                             .collect(Collectors.toList()));
         });
 
-        /* ── Content cards ───────────────────────────────────────── */
+        /* ── Content cards ─────────────────────────────────────── */
         contentPanel.add(textToImagePanel, CARD_GENERATE);
         contentPanel.add(img2ImgPanel,     CARD_IMG2IMG);
         contentPanel.add(imageUpscalePanel, CARD_UPSCALE);
@@ -159,7 +159,7 @@ public class MainFrame extends JFrame {
         managementList.setCellRenderer(new SidebarRenderer());
         managementList.setOpaque(false);
 
-        // Wire listeners after both lists exist
+        // Wire listeners after all lists exist
         workflowList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting() && workflowList.getSelectedIndex() >= 0) {
                 managementList.clearSelection();
@@ -201,7 +201,7 @@ public class MainFrame extends JFrame {
         workflowList.setAlignmentX(Component.LEFT_ALIGNMENT);
         workflowSection.add(workflowList);
 
-        // Management section (pinned to bottom)
+        // Management section
         JPanel managementSection = new JPanel();
         managementSection.setLayout(new BoxLayout(managementSection, BoxLayout.Y_AXIS));
         managementSection.setOpaque(false);
@@ -214,13 +214,21 @@ public class MainFrame extends JFrame {
         managementSection.add(managementHeader);
         managementList.setAlignmentX(Component.LEFT_ALIGNMENT);
         managementSection.add(managementList);
-        managementSection.setBorder(BorderFactory.createEmptyBorder(0, 0, 12, 0));
 
-        // Combine: workflow on top, management at bottom with glue between
+        // Diagnostics section removed
+
+        // Bottom panel: management
+        JPanel bottomSection = new JPanel();
+        bottomSection.setLayout(new BoxLayout(bottomSection, BoxLayout.Y_AXIS));
+        bottomSection.setOpaque(false);
+        bottomSection.setBorder(BorderFactory.createEmptyBorder(0, 0, 12, 0));
+        bottomSection.add(managementSection);
+
+        // Combine: workflow on top, management at bottom
         JPanel sidebarContent = new JPanel(new BorderLayout());
         sidebarContent.setOpaque(false);
         sidebarContent.add(workflowSection, BorderLayout.NORTH);
-        sidebarContent.add(managementSection, BorderLayout.SOUTH);
+        sidebarContent.add(bottomSection, BorderLayout.SOUTH);
 
         sidebarPanel.add(sidebarContent, BorderLayout.CENTER);
 
@@ -322,11 +330,8 @@ public class MainFrame extends JFrame {
 
     private void switchToCard(String card, JList<String> targetList, int index) {
         cardLayout.show(contentPanel, card);
-        if (targetList == workflowList) {
-            managementList.clearSelection();
-        } else {
-            workflowList.clearSelection();
-        }
+        if (targetList != workflowList) workflowList.clearSelection();
+        if (targetList != managementList) managementList.clearSelection();
         targetList.setSelectedIndex(index);
     }
 
@@ -405,10 +410,8 @@ public class MainFrame extends JFrame {
         }
         int cores = Runtime.getRuntime().availableProcessors();
         long mem = Runtime.getRuntime().maxMemory() / (1024 * 1024);
-        String djl = atri.palaash.lumenforge.inference.DjlPyTorchService.isAvailable()
-                ? "  \u2502  DJL \u2713" : "";
         return "EP: " + ep + "  \u2502  Cores: " + cores + "  \u2502  Heap: " + mem
-                + " MB  \u2502  Java " + Runtime.version() + djl;
+                + " MB  \u2502  Java " + Runtime.version();
     }
 
     /* ================================================================== */

@@ -56,6 +56,7 @@ public class ModelDownloader {
         return CompletableFuture.supplyAsync(() -> {
             Path target = storage.modelPath(descriptor);
             List<Path> writtenFiles = new ArrayList<>();
+            System.out.println("[LumenForge] Download started: " + descriptor.displayName());
             try {
                 String downloadUrl = descriptor.sourceUrl();
                 if (!downloadUrl.toLowerCase(Locale.ROOT).contains(".onnx")
@@ -71,8 +72,12 @@ public class ModelDownloader {
                 downloadCompanionFilesIfNeeded(descriptor, target.getParent(), progressConsumer, writtenFiles);
                 downloadKnownBundleFiles(descriptor, progressConsumer, writtenFiles);
 
+                System.out.println("[LumenForge] Download complete: " + descriptor.displayName()
+                        + " (" + writtenFiles.size() + " file(s))");
                 return target;
             } catch (Exception ex) {
+                System.out.println("[LumenForge] ERROR: Download failed: " + descriptor.displayName()
+                        + " — " + ex.getMessage());
                 for (Path written : writtenFiles) {
                     try {
                         Files.deleteIfExists(written);
@@ -227,6 +232,9 @@ public class ModelDownloader {
                 lastException = ex;
                 if (attempt < MAX_RETRIES) {
                     long backoff = 2000L * attempt;
+                    System.out.println("[LumenForge] WARN: Download stalled/failed for " + target.getFileName()
+                            + ", retrying in " + (backoff / 1000) + "s (attempt "
+                            + (attempt + 1) + "/" + MAX_RETRIES + ")");
                     if (progressConsumer != null) {
                         progressConsumer.accept(new DownloadProgress(-1, -1,
                                 "Download stalled/failed, retrying in " + (backoff / 1000) + "s (attempt "
