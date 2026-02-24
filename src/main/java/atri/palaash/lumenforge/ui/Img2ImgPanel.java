@@ -61,6 +61,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import atri.palaash.lumenforge.storage.ModelStorage;
 
 /**
  * Image-to-Image / Inpainting panel.
@@ -100,6 +101,8 @@ public class Img2ImgPanel extends JPanel {
     /* ── State ────────────────────────────────────────────────────── */
     private final ModelDownloader modelDownloader;
     private final InferenceService inferenceService;
+    private ModelStorage modelStorage;
+    private Runnable openModelManager;
     private File inputImageFile;
     private BufferedImage inputImage;
     private BufferedImage resultImage;
@@ -225,11 +228,28 @@ public class Img2ImgPanel extends JPanel {
     /* ---- Accessors ---- */
     public void setGpuSupplier(BooleanSupplier supplier) { this.gpuSupplier = supplier; }
 
+    public void setModelStorage(ModelStorage storage) { this.modelStorage = storage; }
+
+    public void setOpenModelManager(Runnable callback) { this.openModelManager = callback; }
+
     public void updateModels(List<ModelDescriptor> models) {
+        List<ModelDescriptor> available = models;
+        if (modelStorage != null) {
+            available = models.stream()
+                    .filter(m -> modelStorage.isAvailable(m))
+                    .collect(java.util.stream.Collectors.toList());
+        }
         ModelDescriptor selected = (ModelDescriptor) modelCombo.getSelectedItem();
         modelCombo.removeAllItems();
-        models.forEach(modelCombo::addItem);
+        available.forEach(modelCombo::addItem);
         if (selected != null) modelCombo.setSelectedItem(selected);
+        if (modelCombo.getItemCount() == 0) {
+            generateButton.setEnabled(false);
+            statusLabel.setText("No models downloaded. Open Model Manager to download one.");
+        } else {
+            if (!running) generateButton.setEnabled(true);
+            statusLabel.setText("Ready");
+        }
     }
 
     /* ================================================================== */
@@ -381,7 +401,15 @@ public class Img2ImgPanel extends JPanel {
         }
 
         ModelDescriptor model = (ModelDescriptor) modelCombo.getSelectedItem();
-        if (model == null) return;
+        if (model == null) {
+            if (openModelManager != null) {
+                statusLabel.setText("No models available. Opening Model Manager\u2026");
+                openModelManager.run();
+            } else {
+                statusLabel.setText("No models downloaded. Open Model Manager (\u2318M) to download one.");
+            }
+            return;
+        }
 
         setRunning(true);
 

@@ -50,6 +50,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import atri.palaash.lumenforge.storage.ModelStorage;
 
 /**
  * Image Upscale panel. Clean two-step UI: pick a model, browse an input image,
@@ -60,6 +61,8 @@ public class ImageUpscalePanel extends JPanel {
 
     private final ModelDownloader modelDownloader;
     private final InferenceService inferenceService;
+    private ModelStorage modelStorage;
+    private Runnable openModelManager;
 
     /* Controls */
     private final JComboBox<ModelDescriptor> modelCombo;
@@ -380,7 +383,15 @@ public class ImageUpscalePanel extends JPanel {
 
     private void runInference() {
         ModelDescriptor model = (ModelDescriptor) modelCombo.getSelectedItem();
-        if (model == null) { statusLabel.setText("Select a model first."); return; }
+        if (model == null) {
+            if (openModelManager != null) {
+                statusLabel.setText("No models available. Opening Model Manager\u2026");
+                openModelManager.run();
+            } else {
+                statusLabel.setText("No models downloaded. Open Model Manager (\u2318M) to download one.");
+            }
+            return;
+        }
         if (inputImagePath.isBlank()) { statusLabel.setText("Choose an input image first."); return; }
 
         setRunning(true, "Preparing\u2026");
@@ -528,16 +539,34 @@ public class ImageUpscalePanel extends JPanel {
         this.gpuSupplier = supplier;
     }
 
+    public void setModelStorage(ModelStorage storage) {
+        this.modelStorage = storage;
+    }
+
+    public void setOpenModelManager(Runnable callback) {
+        this.openModelManager = callback;
+    }
+
     /* ================================================================== */
     /*  Model updates                                                      */
     /* ================================================================== */
 
     public void updateModels(List<ModelDescriptor> models) {
+        List<ModelDescriptor> available = models;
+        if (modelStorage != null) {
+            available = models.stream()
+                    .filter(m -> modelStorage.isAvailable(m))
+                    .collect(java.util.stream.Collectors.toList());
+        }
         modelCombo.removeAllItems();
-        for (ModelDescriptor m : models) { modelCombo.addItem(m); }
+        for (ModelDescriptor m : available) { modelCombo.addItem(m); }
         if (modelCombo.getItemCount() > 0) {
             modelCombo.setSelectedIndex(0);
             if (!running) { runButton.setEnabled(true); }
+            statusLabel.setText("Ready");
+        } else {
+            runButton.setEnabled(false);
+            statusLabel.setText("No models downloaded. Open Model Manager to download one.");
         }
     }
 

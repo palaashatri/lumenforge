@@ -66,8 +66,8 @@ public class MainFrame extends JFrame {
     private final JLabel statusBarLabel;
 
     /* Sidebar lists */
-    private final JList<String> workflowList;
-    private final JList<String> managementList;
+    private JList<String> workflowList;
+    private JList<String> managementList;
 
     /* GPU state (shared across panels via supplier) */
     private boolean gpuEnabled = true;
@@ -101,9 +101,25 @@ public class MainFrame extends JFrame {
         img2ImgPanel = new Img2ImgPanel(
                 img2imgModels, downloader, services.get(TaskType.IMAGE_TO_IMAGE));
 
+        /* Inject storage so panels filter to downloaded-only models */
+        Runnable goToModels = () -> {
+            if (managementList != null) switchToCard(CARD_MODELS, managementList, 0);
+        };
+        textToImagePanel.setModelStorage(storage);
+        textToImagePanel.setOpenModelManager(goToModels);
+        imageUpscalePanel.setModelStorage(storage);
+        imageUpscalePanel.setOpenModelManager(goToModels);
+        img2ImgPanel.setModelStorage(storage);
+        img2ImgPanel.setOpenModelManager(goToModels);
+
         textToImagePanel.setGpuSupplier(() -> gpuEnabled);
         imageUpscalePanel.setGpuSupplier(() -> gpuEnabled);
         img2ImgPanel.setGpuSupplier(() -> gpuEnabled);
+
+        /* Apply initial downloaded-only filter */
+        textToImagePanel.updateModels(t2iModels);
+        imageUpscalePanel.updateModels(upscaleModels);
+        img2ImgPanel.updateModels(img2imgModels);
 
         modelManagerPanel = new ModelManagerPanel(registry, storage, downloader);
         modelManagerPanel.setOnModelsUpdated(() -> {
