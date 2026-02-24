@@ -2,7 +2,7 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"label": "Build LumenForge",
+			"label": "Build JForge",
 			"type": "shell",
 			"command": "mvn",
 			"args": [
@@ -14,7 +14,7 @@
 			"group": "build"
 		},
 		{
-			"label": "Run LumenForge",
+			"label": "Run JForge",
 			"type": "shell",
 			"command": "mvn",
 			"args": [
@@ -30,7 +30,7 @@
 			}
 		},
 		{
-			"label": "Package LumenForge",
+			"label": "Package JForge",
 			"type": "shell",
 			"command": "mvn",
 			"args": [
@@ -41,7 +41,7 @@
 			"isBackground": false
 		},
 		{
-			"label": "Clean LumenForge",
+			"label": "Clean JForge",
 			"type": "shell",
 			"command": "mvn",
 			"args": [

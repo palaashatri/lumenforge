@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PyTorch → ONNX converter for LumenForge.
+PyTorch → ONNX converter for JForge.
 
 Converts HuggingFace diffusers pipelines (Stable Diffusion, SDXL, etc.)
 or generic PyTorch models (.pt / .pth) to ONNX format for inference
@@ -9,7 +9,7 @@ with ONNX Runtime.
 Usage — diffusers pipeline (recommended for SD models):
     python convert_pytorch_to_onnx.py \
         --model_id runwayml/stable-diffusion-v1-5 \
-        --output_dir ~/.lumenforge-models/text-image/converted/sd-v15
+        --output_dir ~/.jforge-models/text-image/converted/sd-v15
 
 Usage — generic PyTorch model (per Microsoft tutorial):
     python convert_pytorch_to_onnx.py \
@@ -193,7 +193,7 @@ def convert_generic(model_path, output_dir, input_shape_str):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="LumenForge PyTorch → ONNX converter"
+        description="JForge PyTorch → ONNX converter"
     )
     ap.add_argument(
         "--model_id", required=True,

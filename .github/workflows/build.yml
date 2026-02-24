@@ -1,4 +1,4 @@
-name: Build LumenForge
+name: Build JForge
 
 on:
   push:
@@ -26,7 +26,7 @@ jobs:
           - label: "Universal (CPU / macOS CoreML)"
             ort_artifact: onnxruntime
             classifier: "-universal"
-            asset_name: lumenforge-universal.jar
+            asset_name: jforge-universal.jar
 
           # ── NVIDIA GPU (CUDA + TensorRT) ───────────────────────────
           # For Windows and Linux with NVIDIA GPUs.
@@ -34,7 +34,7 @@ jobs:
           - label: "NVIDIA GPU (CUDA + TensorRT)"
             ort_artifact: onnxruntime_gpu
             classifier: "-nvidia"
-            asset_name: lumenforge-nvidia.jar
+            asset_name: jforge-nvidia.jar
 
     steps:
       - name: Checkout
@@ -55,7 +55,7 @@ jobs:
 
       - name: Rename artifact
         run: |
-          JAR=$(find target -maxdepth 1 -name "lumenforge-*${{ matrix.classifier }}.jar" | head -1)
+          JAR=$(find target -maxdepth 1 -name "jforge-*${{ matrix.classifier }}.jar" | head -1)
           cp "$JAR" "target/${{ matrix.asset_name }}"
           echo "Built: ${{ matrix.asset_name }} ($(du -h target/${{ matrix.asset_name }} | cut -f1))"
 
@@ -87,5 +87,5 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            artifacts/lumenforge-universal.jar
-            artifacts/lumenforge-nvidia.jar
+            artifacts/jforge-universal.jar
+            artifacts/jforge-nvidia.jar
