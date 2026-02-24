@@ -245,11 +245,85 @@ public class PyTorchToOnnxConverter {
 
         runConversionScript(venvPython, scriptPath, modelId, outputDir, mode, hfToken);
 
+        // 7. Post-conversion cleanup — reclaim disk space from intermediate caches
+        cleanupAfterConversion(modelId, venvPython);
+
         report("Conversion complete → " + outputDir);
         return outputDir;
     }
 
     /* ── Internal helpers ────────────────────────────────────────────── */
+
+    /**
+     * Remove intermediate caches that are no longer needed after a successful
+     * conversion. This can reclaim 10-20+ GB for large models like SD 3.5.
+     *
+     * <p>Targets:
+     * <ul>
+     *   <li>HuggingFace hub cache for the specific model
+     *       ({@code ~/.cache/huggingface/hub/models--<org>--<name>/})</li>
+     *   <li>pip HTTP cache ({@code ~/Library/Caches/pip/} on macOS,
+     *       {@code ~/.cache/pip/} on Linux)</li>
+     * </ul>
+     */
+    private void cleanupAfterConversion(String modelId, String venvPython) {
+        // ── 1. Delete the HuggingFace model cache for the converted model ──
+        //    HF stores snapshots under ~/.cache/huggingface/hub/models--<org>--<name>/
+        if (modelId != null && modelId.contains("/")) {
+            String sanitized = "models--" + modelId.replace("/", "--");
+            Path hfCacheDir = Path.of(System.getProperty("user.home"),
+                    ".cache", "huggingface", "hub", sanitized);
+            if (Files.isDirectory(hfCacheDir)) {
+                report("Cleaning up HuggingFace cache: " + hfCacheDir);
+                try {
+                    long freedBytes = deleteDirectoryTree(hfCacheDir);
+                    String freedGb = String.format("%.1f", freedBytes / (1024.0 * 1024.0 * 1024.0));
+                    report("Freed " + freedGb + " GB from HuggingFace cache.");
+                } catch (IOException e) {
+                    report("Warning: could not fully clean HF cache — " + e.getMessage());
+                }
+            }
+        }
+
+        // ── 2. Clear pip HTTP cache ──
+        try {
+            ProcessBuilder pb = new ProcessBuilder(venvPython, "-m", "pip", "cache", "purge");
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            // Consume output to prevent blocking
+            p.getInputStream().readAllBytes();
+            int exit = p.waitFor();
+            if (exit == 0) {
+                report("Cleared pip cache.");
+            }
+        } catch (Exception ignored) {
+            // pip cache purge is best-effort
+        }
+    }
+
+    /**
+     * Recursively delete a directory tree and return the total bytes freed.
+     */
+    private static long deleteDirectoryTree(Path root) throws IOException {
+        long[] freed = {0};
+        java.nio.file.Files.walkFileTree(root, new java.nio.file.SimpleFileVisitor<>() {
+            @Override
+            public java.nio.file.FileVisitResult visitFile(Path file,
+                    java.nio.file.attribute.BasicFileAttributes attrs) throws IOException {
+                freed[0] += attrs.size();
+                Files.delete(file);
+                return java.nio.file.FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public java.nio.file.FileVisitResult postVisitDirectory(Path dir, IOException exc)
+                    throws IOException {
+                Files.delete(dir);
+                return java.nio.file.FileVisitResult.CONTINUE;
+            }
+        });
+        return freed[0];
+    }
 
     private boolean isVenvReady() {
         return Files.exists(getVenvPython());
