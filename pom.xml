@@ -14,6 +14,8 @@
         <!-- Overridden to onnxruntime_gpu on Windows / Linux via profiles -->
         <ort.artifactId>onnxruntime</ort.artifactId>
         <ort.version>1.22.0</ort.version>
+        <!-- Classifier appended to the shaded JAR name (overridden by CI) -->
+        <jar.classifier></jar.classifier>
     </properties>
 
     <dependencies>
@@ -72,6 +74,7 @@
                         <goals><goal>shade</goal></goals>
                         <configuration>
                             <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <finalName>${project.artifactId}-${project.version}${jar.classifier}</finalName>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <mainClass>atri.palaash.lumenforge.app.LumenForgeApp</mainClass>

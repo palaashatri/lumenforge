@@ -1,0 +1,91 @@
+name: Build LumenForge
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed for release uploads
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Universal (CPU + CoreML on macOS) ──────────────────────
+          # Works on macOS (CoreML GPU/ANE), Windows (CPU), Linux (CPU).
+          # AMD DirectML / Intel OpenVINO users: install native libs
+          # separately and this JAR will auto-detect them at runtime.
+          - label: "Universal (CPU / macOS CoreML)"
+            ort_artifact: onnxruntime
+            classifier: "-universal"
+            asset_name: lumenforge-universal.jar
+
+          # ── NVIDIA GPU (CUDA + TensorRT) ───────────────────────────
+          # For Windows and Linux with NVIDIA GPUs.
+          # Requires CUDA toolkit + cuDNN on the host system.
+          - label: "NVIDIA GPU (CUDA + TensorRT)"
+            ort_artifact: onnxruntime_gpu
+            classifier: "-nvidia"
+            asset_name: lumenforge-nvidia.jar
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build fat JAR
+        run: |
+          mvn clean package -DskipTests \
+            -Dort.artifactId=${{ matrix.ort_artifact }} \
+            -Djar.classifier=${{ matrix.classifier }}
+
+      - name: Rename artifact
+        run: |
+          JAR=$(find target -maxdepth 1 -name "lumenforge-*${{ matrix.classifier }}.jar" | head -1)
+          cp "$JAR" "target/${{ matrix.asset_name }}"
+          echo "Built: ${{ matrix.asset_name }} ($(du -h target/${{ matrix.asset_name }} | cut -f1))"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: target/${{ matrix.asset_name }}
+          retention-days: 14
+
+  # ── Release (only on version tags) ──────────────────────────────────
+  release:
+    name: Create Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/lumenforge-universal.jar
+            artifacts/lumenforge-nvidia.jar
