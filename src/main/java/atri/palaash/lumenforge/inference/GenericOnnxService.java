@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -41,6 +42,11 @@ public class GenericOnnxService implements InferenceService {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final Pattern TOKEN_PATTERN = Pattern.compile("'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+");
 
+    /* ── Session & Tokenizer Caches ────────────────────────────────── */
+    private static final ConcurrentHashMap<String, OrtSession> SESSION_CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, ClipTokenizer> TOKENIZER_CACHE = new ConcurrentHashMap<>();
+    private static volatile String cachedEpKey = "";
+
     private final TaskType taskType;
     private final ModelStorage storage;
     private final Executor executor;
@@ -49,6 +55,54 @@ public class GenericOnnxService implements InferenceService {
         this.taskType = taskType;
         this.storage = storage;
         this.executor = executor;
+    }
+
+    /* ── Cache helpers ─────────────────────────────────────────────── */
+
+    /**
+     * Return a cached OrtSession for the given model path, or create and
+     * cache a new one. Subsequent inference calls skip expensive model
+     * loading and graph optimization — the single biggest performance win.
+     */
+    private OrtSession getOrCreateSession(OrtEnvironment env, Path modelPath,
+                                           OrtSession.SessionOptions opts) throws OrtException {
+        String key = modelPath.toAbsolutePath().toString();
+        OrtSession existing = SESSION_CACHE.get(key);
+        if (existing != null) {
+            return existing;
+        }
+        OrtSession session = env.createSession(modelPath.toString(), opts);
+        SESSION_CACHE.put(key, session);
+        return session;
+    }
+
+    /**
+     * Get or load a ClipTokenizer — vocab.json and merges.txt are cached
+     * in memory so repeated inference calls skip disk I/O and JSON parsing.
+     */
+    private ClipTokenizer getOrCreateTokenizer(Path vocabPath, Path mergesPath) throws Exception {
+        String key = vocabPath.toAbsolutePath() + "|" + mergesPath.toAbsolutePath();
+        ClipTokenizer cached = TOKENIZER_CACHE.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        ClipTokenizer tokenizer = ClipTokenizer.load(vocabPath, mergesPath);
+        TOKENIZER_CACHE.put(key, tokenizer);
+        return tokenizer;
+    }
+
+    /**
+     * Evict all cached ORT sessions (e.g. when the user explicitly wants
+     * a fresh start or switches execution providers). Also clears the
+     * tokenizer cache.
+     */
+    public static void clearCache() {
+        SESSION_CACHE.forEach((k, session) -> {
+            try { session.close(); } catch (Exception ignored) { }
+        });
+        SESSION_CACHE.clear();
+        TOKENIZER_CACHE.clear();
+        cachedEpKey = "";
     }
 
     @Override
@@ -71,13 +125,21 @@ public class GenericOnnxService implements InferenceService {
                 OrtEnvironment environment = OrtEnvironment.getEnvironment();
                 OrtSession.SessionOptions sessionOptions = new OrtSession.SessionOptions();
                 sessionOptions.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
-                sessionOptions.setIntraOpNumThreads(Math.max(1, Runtime.getRuntime().availableProcessors() - 1));
-                sessionOptions.setInterOpNumThreads(Math.max(1, Runtime.getRuntime().availableProcessors() - 1));
+                int cpus = Runtime.getRuntime().availableProcessors();
+                sessionOptions.setIntraOpNumThreads(Math.max(1, cpus - 1));
+                sessionOptions.setInterOpNumThreads(Math.max(1, Math.min(cpus / 2, 4)));
                 ProviderSelection providerSelection = configureExecutionProvider(sessionOptions, request.preferGpu());
+
+                // Invalidate session cache when the execution provider changes.
+                String epKey = providerSelection.provider() + "|" + request.preferGpu();
+                if (!epKey.equals(cachedEpKey)) {
+                    clearCache();
+                    cachedEpKey = epKey;
+                }
                 if ("realesrgan".equals(request.model().id())) {
-                    try (OrtSession session = environment.createSession(modelPath.toString(), sessionOptions)) {
-                        return runRealEsrgan(environment, session, request, providerSelection.provider());
-                    }
+                    OrtSession session = getOrCreateSession(environment,
+                            modelPath, sessionOptions);
+                    return runRealEsrgan(environment, session, request, providerSelection.provider());
                 }
                 if ("sd_v15_onnx".equals(request.model().id())) {
                     return runStableDiffusionV15(environment, sessionOptions, request, providerSelection.provider());
@@ -87,6 +149,9 @@ public class GenericOnnxService implements InferenceService {
                 }
                 if ("sdxl_turbo_onnx".equals(request.model().id())) {
                     return runSdxlTurbo(environment, sessionOptions, request, providerSelection.provider());
+                }
+                if ("sdxl_base_onnx".equals(request.model().id())) {
+                    return runSdxlBase(environment, sessionOptions, request, providerSelection.provider());
                 }
                 // DJL/PyTorch models — delegate to the DJL backend
                 if (request.model().id().contains("pytorch")) {
@@ -154,14 +219,15 @@ public class GenericOnnxService implements InferenceService {
                 }
             }
 
-            ClipTokenizer tokenizer = ClipTokenizer.load(vocabPath, mergesPath);
+            ClipTokenizer tokenizer = getOrCreateTokenizer(vocabPath, mergesPath);
             long[] promptTokens = tokenizer.encode(request.prompt(), 77);
             long[] negativeTokens = tokenizer.encode(request.negativePrompt() == null ? "" : request.negativePrompt(), 77);
 
             request.reportProgress("Loading models (text encoder, UNet, VAE decoder)\u2026");
-            try (OrtSession textEncoder = environment.createSession(textEncoderPath.toString(), sessionOptions);
-                 OrtSession unet = environment.createSession(unetPath.toString(), sessionOptions);
-                 OrtSession vaeDecoder = environment.createSession(vaeDecoderPath.toString(), sessionOptions)) {
+            OrtSession textEncoder = getOrCreateSession(environment, textEncoderPath, sessionOptions);
+            OrtSession unet = getOrCreateSession(environment, unetPath, sessionOptions);
+            OrtSession vaeDecoder = getOrCreateSession(environment, vaeDecoderPath, sessionOptions);
+            {
 
                 request.reportProgress("Encoding text prompt\u2026");
                 float[][][] textEmbeddings = runTextEncoder(environment, textEncoder, promptTokens);
@@ -285,13 +351,14 @@ public class GenericOnnxService implements InferenceService {
                 }
             }
 
-            ClipTokenizer tokenizer = ClipTokenizer.load(vocabPath, mergesPath);
+            ClipTokenizer tokenizer = getOrCreateTokenizer(vocabPath, mergesPath);
             long[] promptTokens = tokenizer.encode(request.prompt(), 77);
 
             request.reportProgress("Loading SD Turbo models (text encoder, UNet, VAE decoder)\u2026");
-            try (OrtSession textEncoder = environment.createSession(textEncoderPath.toString(), sessionOptions);
-                 OrtSession unet        = environment.createSession(unetPath.toString(), sessionOptions);
-                 OrtSession vaeDecoder   = environment.createSession(vaeDecoderPath.toString(), sessionOptions)) {
+            OrtSession textEncoder = getOrCreateSession(environment, textEncoderPath, sessionOptions);
+            OrtSession unet = getOrCreateSession(environment, unetPath, sessionOptions);
+            OrtSession vaeDecoder = getOrCreateSession(environment, vaeDecoderPath, sessionOptions);
+            {
 
                 request.reportProgress("Encoding text prompt\u2026");
                 float[][][] textEmbeddings = runTextEncoder(environment, textEncoder, promptTokens);
@@ -451,16 +518,17 @@ public class GenericOnnxService implements InferenceService {
                 }
             }
 
-            ClipTokenizer tok1 = ClipTokenizer.load(vocab1, merges1);
-            ClipTokenizer tok2 = ClipTokenizer.load(vocab2, merges2);
+            ClipTokenizer tok1 = getOrCreateTokenizer(vocab1, merges1);
+            ClipTokenizer tok2 = getOrCreateTokenizer(vocab2, merges2);
             long[] tokens1 = tok1.encode(request.prompt(), 77);
             long[] tokens2 = tok2.encode(request.prompt(), 77);
 
             request.reportProgress("Loading SDXL Turbo models (2 text encoders, UNet, VAE)\u2026");
-            try (OrtSession enc1 = environment.createSession(textEncoder1Path.toString(), sessionOptions);
-                 OrtSession enc2 = environment.createSession(textEncoder2Path.toString(), sessionOptions);
-                 OrtSession unet = environment.createSession(unetPath.toString(), sessionOptions);
-                 OrtSession vae  = environment.createSession(vaeDecoderPath.toString(), sessionOptions)) {
+            OrtSession enc1 = getOrCreateSession(environment, textEncoder1Path, sessionOptions);
+            OrtSession enc2 = getOrCreateSession(environment, textEncoder2Path, sessionOptions);
+            OrtSession unet = getOrCreateSession(environment, unetPath, sessionOptions);
+            OrtSession vae  = getOrCreateSession(environment, vaeDecoderPath, sessionOptions);
+            {
 
                 request.reportProgress("Encoding text (CLIP-L)\u2026");
                 float[][][] embed1 = runTextEncoder(environment, enc1, tokens1); // [1, 77, 768]
@@ -603,6 +671,272 @@ public class GenericOnnxService implements InferenceService {
     }
 
     /* ================================================================== */
+    /*  SDXL Base 1.0 — full SDXL with classifier-free guidance,          */
+    /*  dual text encoders (CLIP-L + OpenCLIP-bigG), Euler Discrete       */
+    /*  scheduler, 1024×1024 native resolution.                           */
+    /* ================================================================== */
+
+    private InferenceResult runSdxlBase(OrtEnvironment environment,
+                                        OrtSession.SessionOptions sessionOptions,
+                                        InferenceRequest request,
+                                        String provider) {
+        try {
+            int width  = Math.max(512, (request.width()  / 8) * 8);
+            int height = Math.max(512, (request.height() / 8) * 8);
+            int latentW = width  / 8;
+            int latentH = height / 8;
+            int steps = Math.max(5, Math.min(request.batch() > 0 ? request.batch() : 30, 50));
+            float guidanceScale = request.promptWeight() > 0 ? (float) request.promptWeight() : 7.5f;
+
+            Path base = storage.root().resolve("text-image").resolve("sdxl-base");
+            Path textEncoder1Path = base.resolve("text_encoder/model.onnx");
+            Path textEncoder2Path = base.resolve("text_encoder_2/model.onnx");
+            Path unetPath         = base.resolve("unet/model.onnx");
+            Path vaeDecoderPath   = base.resolve("vae_decoder/model.onnx");
+            Path schedulerConfig  = base.resolve("scheduler/scheduler_config.json");
+            Path vocab1 = base.resolve("tokenizer/vocab.json");
+            Path merges1 = base.resolve("tokenizer/merges.txt");
+            Path vocab2 = base.resolve("tokenizer_2/vocab.json");
+            Path merges2 = base.resolve("tokenizer_2/merges.txt");
+
+            for (Path p : List.of(textEncoder1Path, textEncoder2Path, unetPath, vaeDecoderPath,
+                    vocab1, merges1, vocab2, merges2)) {
+                if (!java.nio.file.Files.exists(p)) {
+                    return InferenceResult.fail("SDXL Base bundle is incomplete (missing "
+                            + p.getFileName() + "). Open Models \u2192 Model Manager and download SDXL Base 1.0.");
+                }
+            }
+
+            ClipTokenizer tok1 = getOrCreateTokenizer(vocab1, merges1);
+            ClipTokenizer tok2 = getOrCreateTokenizer(vocab2, merges2);
+            long[] tokens1 = tok1.encode(request.prompt(), 77);
+            long[] tokens2 = tok2.encode(request.prompt(), 77);
+            long[] negTokens1 = tok1.encode(request.negativePrompt() == null ? "" : request.negativePrompt(), 77);
+            long[] negTokens2 = tok2.encode(request.negativePrompt() == null ? "" : request.negativePrompt(), 77);
+
+            request.reportProgress("Loading SDXL Base models (2 text encoders, UNet, VAE)\u2026");
+            OrtSession enc1 = getOrCreateSession(environment, textEncoder1Path, sessionOptions);
+            OrtSession enc2 = getOrCreateSession(environment, textEncoder2Path, sessionOptions);
+            OrtSession unet = getOrCreateSession(environment, unetPath, sessionOptions);
+            OrtSession vae  = getOrCreateSession(environment, vaeDecoderPath, sessionOptions);
+            {
+                // ── Encode positive prompt with both encoders ──
+                request.reportProgress("Encoding positive prompt (CLIP-L)\u2026");
+                float[][][] embed1 = runTextEncoder(environment, enc1, tokens1);
+
+                request.reportProgress("Encoding positive prompt (OpenCLIP-bigG)\u2026");
+                float[][][] embed2;
+                float[][] pooledPos;
+                {
+                    String inName = resolveInputName(enc2, "input_ids", 0);
+                    TensorInfo tInfo = (TensorInfo) enc2.getInputInfo().get(inName).getInfo();
+                    boolean wantsInt32 = tInfo.type.toString().contains("INT32");
+                    OnnxTensor idsTensor;
+                    if (wantsInt32) {
+                        int[] ids32 = new int[tokens2.length];
+                        for (int i = 0; i < tokens2.length; i++) { ids32[i] = (int) tokens2[i]; }
+                        idsTensor = OnnxTensor.createTensor(environment, new int[][]{ids32});
+                    } else {
+                        idsTensor = OnnxTensor.createTensor(environment, new long[][]{tokens2});
+                    }
+                    Map<String, OnnxTensor> inputs = new HashMap<>();
+                    inputs.put(inName, idsTensor);
+                    try (OrtSession.Result r = enc2.run(inputs)) {
+                        embed2 = null; pooledPos = null;
+                        for (Map.Entry<String, OnnxValue> entry : r) {
+                            if (entry.getValue() instanceof OnnxTensor t) {
+                                Object v = t.getValue();
+                                if (v instanceof float[][][] a3 && embed2 == null) { embed2 = a3; }
+                                else if (v instanceof float[][] a2 && pooledPos == null) { pooledPos = a2; }
+                            }
+                        }
+                        if (embed2 == null) { return InferenceResult.fail("Text encoder 2 produced no hidden states."); }
+                        if (pooledPos == null) { pooledPos = new float[1][1280]; }
+                    } finally { idsTensor.close(); }
+                }
+
+                // ── Encode negative prompt with both encoders ──
+                request.reportProgress("Encoding negative prompt\u2026");
+                float[][][] negEmbed1 = runTextEncoder(environment, enc1, negTokens1);
+                float[][][] negEmbed2;
+                float[][] pooledNeg;
+                {
+                    String inName = resolveInputName(enc2, "input_ids", 0);
+                    TensorInfo tInfo = (TensorInfo) enc2.getInputInfo().get(inName).getInfo();
+                    boolean wantsInt32 = tInfo.type.toString().contains("INT32");
+                    OnnxTensor idsTensor;
+                    if (wantsInt32) {
+                        int[] ids32 = new int[negTokens2.length];
+                        for (int i = 0; i < negTokens2.length; i++) { ids32[i] = (int) negTokens2[i]; }
+                        idsTensor = OnnxTensor.createTensor(environment, new int[][]{ids32});
+                    } else {
+                        idsTensor = OnnxTensor.createTensor(environment, new long[][]{negTokens2});
+                    }
+                    Map<String, OnnxTensor> inputs = new HashMap<>();
+                    inputs.put(inName, idsTensor);
+                    try (OrtSession.Result r = enc2.run(inputs)) {
+                        negEmbed2 = null; pooledNeg = null;
+                        for (Map.Entry<String, OnnxValue> entry : r) {
+                            if (entry.getValue() instanceof OnnxTensor t) {
+                                Object v = t.getValue();
+                                if (v instanceof float[][][] a3 && negEmbed2 == null) { negEmbed2 = a3; }
+                                else if (v instanceof float[][] a2 && pooledNeg == null) { pooledNeg = a2; }
+                            }
+                        }
+                        if (negEmbed2 == null) { return InferenceResult.fail("Text encoder 2 negative produced no hidden states."); }
+                        if (pooledNeg == null) { pooledNeg = new float[1][1280]; }
+                    } finally { idsTensor.close(); }
+                }
+
+                // Concatenate embeddings: [1, 77, 768] + [1, 77, 1280] → [1, 77, 2048]
+                int seqLen = embed1[0].length;
+                int dim1 = embed1[0][0].length;
+                int dim2 = embed2[0][0].length;
+                float[][][] combinedPos = new float[1][seqLen][dim1 + dim2];
+                float[][][] combinedNeg = new float[1][seqLen][dim1 + dim2];
+                for (int s = 0; s < seqLen; s++) {
+                    System.arraycopy(embed1[0][s], 0, combinedPos[0][s], 0, dim1);
+                    System.arraycopy(embed2[0][s], 0, combinedPos[0][s], dim1, dim2);
+                    System.arraycopy(negEmbed1[0][s], 0, combinedNeg[0][s], 0, dim1);
+                    System.arraycopy(negEmbed2[0][s], 0, combinedNeg[0][s], dim1, dim2);
+                }
+                // Batch embeddings: [2, 77, 2048] — negative first, positive second
+                float[][][] batchedHidden = new float[2][seqLen][dim1 + dim2];
+                batchedHidden[0] = combinedNeg[0];
+                batchedHidden[1] = combinedPos[0];
+
+                // Batch pooled: [2, 1280]
+                int poolDim = pooledPos[0].length;
+                float[][] batchedPooled = new float[2][poolDim];
+                System.arraycopy(pooledNeg[0], 0, batchedPooled[0], 0, poolDim);
+                System.arraycopy(pooledPos[0], 0, batchedPooled[1], 0, poolDim);
+
+                // time_ids: [original_h, original_w, crop_y, crop_x, target_h, target_w] — batched [2, 6]
+                float[][] timeIds = {
+                    {height, width, 0, 0, height, width},
+                    {height, width, 0, 0, height, width}
+                };
+
+                // ── Noise schedule from scheduler config ──
+                float[] alphaCumprod;
+                if (java.nio.file.Files.exists(schedulerConfig)) {
+                    alphaCumprod = loadAlphaCumprod(schedulerConfig);
+                } else {
+                    // Compute default SDXL schedule inline
+                    alphaCumprod = computeDefaultAlphaCumprod(1000, 0.00085, 0.012);
+                }
+                int[] timesteps = createTimesteps(steps, alphaCumprod.length);
+
+                // Convert alphas to sigmas for Euler Discrete
+                float[] sigmas = new float[timesteps.length + 1];
+                for (int i = 0; i < timesteps.length; i++) {
+                    float acp = alphaCumprod[Math.min(timesteps[i], alphaCumprod.length - 1)];
+                    sigmas[i] = (float) Math.sqrt((1.0 - acp) / acp);
+                }
+                sigmas[timesteps.length] = 0f; // final sigma
+
+                float[][][][] latents = randomLatents(request.seed(), latentH, latentW);
+                // Scale initial noise by first sigma
+                latents = scaleLatents(latents, sigmas[0]);
+
+                request.reportProgress("Denoising: 0/" + steps + " steps (SDXL Base) \u2014 EP: " + provider);
+                long stepStart = System.currentTimeMillis();
+                long firstStepDuration = 0;
+                for (int i = 0; i < timesteps.length; i++) {
+                    int t = timesteps[i];
+                    float sigma = sigmas[i];
+                    float sigmaPrev = sigmas[i + 1];
+
+                    // Scale model input: sample / sqrt(sigma^2 + 1)
+                    float scaleFactor = (float) (1.0 / Math.sqrt(sigma * sigma + 1.0));
+                    float[][][][] scaledInput = scaleLatents(latents, scaleFactor);
+
+                    // Duplicate for CFG batch [2, 4, H, W]
+                    float[][][][] batchInput = duplicateBatch(scaledInput);
+
+                    OnnxTensor sampleT   = OnnxTensor.createTensor(environment, batchInput);
+                    OnnxTensor tsT       = createTimestepTensor(environment, unet, t);
+                    OnnxTensor hiddenT   = OnnxTensor.createTensor(environment, batchedHidden);
+                    OnnxTensor embedsT   = OnnxTensor.createTensor(environment, batchedPooled);
+                    OnnxTensor timeIdsT  = OnnxTensor.createTensor(environment, timeIds);
+
+                    Map<String, OnnxTensor> unetInputs = new HashMap<>();
+                    unetInputs.put(resolveInputName(unet, "sample", 0), sampleT);
+                    unetInputs.put(resolveInputName(unet, "timestep", 1), tsT);
+                    unetInputs.put(resolveInputName(unet, "encoder_hidden_states", 2), hiddenT);
+                    for (String name : unet.getInputNames()) {
+                        if (name.contains("text_embeds") || name.contains("added_cond_kwargs.text_embeds")) {
+                            unetInputs.put(name, embedsT);
+                        } else if (name.contains("time_ids") || name.contains("added_cond_kwargs.time_ids")) {
+                            unetInputs.put(name, timeIdsT);
+                        }
+                    }
+
+                    float[][][][] noise;
+                    try (OrtSession.Result unetResult = unet.run(unetInputs)) {
+                        noise = extractTensor4d(unetResult);
+                    } finally {
+                        sampleT.close(); tsT.close(); hiddenT.close(); embedsT.close(); timeIdsT.close();
+                    }
+
+                    if (noise == null || noise.length < 2) {
+                        return InferenceResult.fail("SDXL Base UNet produced invalid output.");
+                    }
+
+                    // Classifier-free guidance
+                    float[][][] guidedNoise = guidance(noise[0], noise[1], guidanceScale);
+
+                    // Euler step
+                    latents = eulerStep(latents, guidedNoise, sigma, sigmaPrev);
+
+                    long elapsed = System.currentTimeMillis() - stepStart;
+                    stepStart = System.currentTimeMillis();
+                    if (i == 0) { firstStepDuration = elapsed; }
+                    int remaining = steps - (i + 1);
+                    long avgMs = (i == 0) ? firstStepDuration : elapsed;
+                    long etaSec = (remaining * avgMs) / 1000;
+                    String eta = etaSec > 60
+                            ? String.format("%dm %02ds", etaSec / 60, etaSec % 60)
+                            : etaSec + "s";
+                    request.reportProgress("Denoising: " + (i + 1) + "/" + steps
+                            + " steps (" + String.format("%.1f", elapsed / 1000.0) + "s/step, ETA: " + eta + ")");
+
+                    if (request.isCancelled()) {
+                        return InferenceResult.fail("Cancelled by user.");
+                    }
+                }
+
+                // SDXL VAE uses 0.13025 scaling factor
+                request.reportProgress("Decoding latents with VAE\u2026");
+                float[][][][] scaledLatents = scaleLatents(latents, 1f / 0.13025f);
+                OnnxTensor latTensor = OnnxTensor.createTensor(environment, scaledLatents);
+                Map<String, OnnxTensor> vaeIn = new HashMap<>();
+                vaeIn.put(resolveInputName(vae, "latent", 0), latTensor);
+
+                float[][][][] decoded;
+                try (OrtSession.Result vaeResult = vae.run(vaeIn)) {
+                    decoded = extractTensor4d(vaeResult);
+                } finally {
+                    latTensor.close();
+                }
+
+                if (decoded == null || decoded.length == 0) {
+                    return InferenceResult.fail("VAE decoder output is empty.");
+                }
+
+                BufferedImage image = tensorToImage(decoded[0]);
+                Path outputPath = writeOutputImage(image, "sdxl-base");
+                return InferenceResult.ok(
+                        "Generated image for prompt: \"" + request.prompt() + "\"",
+                        "SDXL Base 1.0 pipeline completed (" + steps + " steps, CFG=" + guidanceScale + ") | EP=" + provider,
+                        outputPath.toString(), "image");
+            }
+        } catch (Exception ex) {
+            return InferenceResult.fail("SDXL Base pipeline failed: " + ex.getMessage());
+        }
+    }
+
+    /* ================================================================== */
     /*  Image-to-Image / Inpainting (SD v1.5 or SD Turbo ONNX)           */
     /* ================================================================== */
 
@@ -670,15 +1004,16 @@ public class GenericOnnxService implements InferenceService {
             // Convert input image to tensor [1, 3, H, W] normalized to [-1, 1]
             float[][][][] imageTensor = imageToLatentInput(resized);
 
-            ClipTokenizer tokenizer = ClipTokenizer.load(vocab, merges);
+            ClipTokenizer tokenizer = getOrCreateTokenizer(vocab, merges);
             long[] tokens = tokenizer.encode(request.prompt(), 77);
             long[] uncondTokens = tokenizer.encode("", 77);
 
             request.reportProgress("Loading models for Img2Img pipeline\u2026");
-            try (OrtSession textEncoder = environment.createSession(textEncoderPath.toString(), sessionOptions);
-                 OrtSession unet = environment.createSession(unetPath.toString(), sessionOptions);
-                 OrtSession vaeDecoder = environment.createSession(vaeDecoderPath.toString(), sessionOptions);
-                 OrtSession vaeEncoder = environment.createSession(vaeEncoderPath.toString(), sessionOptions)) {
+            OrtSession textEncoder = getOrCreateSession(environment, textEncoderPath, sessionOptions);
+            OrtSession unet = getOrCreateSession(environment, unetPath, sessionOptions);
+            OrtSession vaeDecoder = getOrCreateSession(environment, vaeDecoderPath, sessionOptions);
+            OrtSession vaeEncoder = getOrCreateSession(environment, vaeEncoderPath, sessionOptions);
+            {
 
                 // Text encoding
                 request.reportProgress("Encoding prompt\u2026");
@@ -1363,6 +1698,18 @@ public class GenericOnnxService implements InferenceService {
         int trainTimesteps = ((Number) config.getOrDefault("num_train_timesteps", 1000)).intValue();
         double betaStart = ((Number) config.getOrDefault("beta_start", 0.00085)).doubleValue();
         double betaEnd = ((Number) config.getOrDefault("beta_end", 0.012)).doubleValue();
+        float[] alphaCumprod = new float[trainTimesteps];
+        double cumulative = 1.0;
+        for (int i = 0; i < trainTimesteps; i++) {
+            double beta = betaStart + (betaEnd - betaStart) * i / Math.max(1, trainTimesteps - 1);
+            cumulative *= (1.0 - beta);
+            alphaCumprod[i] = (float) cumulative;
+        }
+        return alphaCumprod;
+    }
+
+    /** Compute alpha_cumprod inline when scheduler_config.json is unavailable. */
+    private float[] computeDefaultAlphaCumprod(int trainTimesteps, double betaStart, double betaEnd) {
         float[] alphaCumprod = new float[trainTimesteps];
         double cumulative = 1.0;
         for (int i = 0; i < trainTimesteps; i++) {

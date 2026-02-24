@@ -55,6 +55,10 @@ public class ModelRegistry {
             "text-image/stable-diffusion-v15/unet/model.onnx",
             "https://huggingface.co/onnx-community/stable-diffusion-v1-5-ONNX/resolve/main/unet/model.onnx",
             "Auto-downloads UNet ONNX from onnx-community/stable-diffusion-v1-5-ONNX."));
+        textToImage.add(new ModelDescriptor("sdxl_base_onnx", "Stable Diffusion XL Base 1.0 ONNX", TaskType.TEXT_TO_IMAGE,
+            "text-image/sdxl-base/unet/model.onnx",
+            "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/unet/model.onnx",
+            "Auto-downloads SDXL Base 1.0 ONNX from stabilityai. Dual text encoders, 1024×1024 native."));
 
         List<ModelDescriptor> imageUpscale = new ArrayList<>();
         imageUpscale.add(new ModelDescriptor("realesrgan", "Real-ESRGAN ONNX", TaskType.IMAGE_UPSCALE,

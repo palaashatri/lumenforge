@@ -173,6 +173,18 @@ public class ModelDownloader {
                             "tokenizer/merges.txt", "tokenizer/special_tokens_map.json",
                             "tokenizer/tokenizer_config.json", "tokenizer/vocab.json"
                     ), progressConsumer, writtenFiles);
+        } else if ("sdxl_base_onnx".equals(descriptor.id())) {
+            // SDXL Base 1.0 — dual text encoders, large UNet
+            downloadSdBundle(descriptor, "text-image/sdxl-base",
+                    List.of(
+                            "unet/model.onnx", "unet/model.onnx_data",
+                            "text_encoder/model.onnx",
+                            "text_encoder_2/model.onnx", "text_encoder_2/model.onnx_data",
+                            "vae_decoder/model.onnx",
+                            "scheduler/scheduler_config.json",
+                            "tokenizer/merges.txt", "tokenizer/vocab.json",
+                            "tokenizer_2/merges.txt", "tokenizer_2/vocab.json"
+                    ), progressConsumer, writtenFiles);
         }
     }
 

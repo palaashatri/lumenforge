@@ -17,7 +17,7 @@
         <dependency>
             <groupId>com.microsoft.onnxruntime</groupId>
             <artifactId>onnxruntime</artifactId>
-            <version>1.18.0</version>
+            <version>1.22.0</version>
         </dependency>
         <dependency>
             <groupId>com.formdev</groupId>
@@ -94,7 +94,7 @@
                 <dependency>
                     <groupId>com.microsoft.onnxruntime</groupId>
                     <artifactId>onnxruntime_gpu</artifactId>
-                    <version>1.18.0</version>
+                    <version>1.22.0</version>
                 </dependency>
             </dependencies>
         </profile>
@@ -114,7 +114,7 @@
                 <dependency>
                     <groupId>com.microsoft.onnxruntime</groupId>
                     <artifactId>onnxruntime_gpu</artifactId>
-                    <version>1.18.0</version>
+                    <version>1.22.0</version>
                 </dependency>
             </dependencies>
         </profile>
