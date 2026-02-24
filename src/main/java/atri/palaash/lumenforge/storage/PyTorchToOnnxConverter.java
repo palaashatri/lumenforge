@@ -132,6 +132,21 @@ public class PyTorchToOnnxConverter {
                 || lower.contains("gemma");
     }
 
+    /**
+     * Return {@code true} if the model is expected to require large amounts of
+     * disk space during conversion (30+ GB for HF cache + ONNX output).
+     */
+    private static boolean isLargeModel(String modelId) {
+        if (modelId == null) return false;
+        String lower = modelId.toLowerCase();
+        return lower.contains("stable-diffusion-3")
+                || lower.contains("sd3")
+                || lower.contains("sd-3")
+                || lower.contains("sdxl")
+                || lower.contains("flux")
+                || lower.contains("sd_xl");
+    }
+
     /* ── Main conversion entry point ─────────────────────────────────── */
 
     /**
@@ -197,7 +212,30 @@ public class PyTorchToOnnxConverter {
         // 4. Write the conversion script to the venv
         Path scriptPath = writeConversionScript();
 
-        // 5. Run the conversion
+        // 5. Check disk space before conversion
+        //    SD 3.5-class models need ~30 GB (HF cache + ONNX output).
+        //    Smaller models (SD 1.5, SDXL) need ~10 GB.
+        long minimumBytes = isLargeModel(modelId) ? 30L * 1024 * 1024 * 1024
+                                                  : 10L * 1024 * 1024 * 1024;
+        try {
+            long usable = Files.getFileStore(outputDir.getParent() != null
+                    ? outputDir.getParent() : outputDir).getUsableSpace();
+            String usableGb = String.format("%.1f", usable / (1024.0 * 1024.0 * 1024.0));
+            String requiredGb = String.format("%.0f", minimumBytes / (1024.0 * 1024.0 * 1024.0));
+            if (usable < minimumBytes) {
+                throw new ConversionException(
+                        "Insufficient disk space: " + usableGb + " GB available, ~"
+                                + requiredGb + " GB required. Free up space or delete old caches:\n"
+                                + "  • HuggingFace cache:  ~/.cache/huggingface/hub/\n"
+                                + "  • Pip cache:          ~/Library/Caches/pip/  (macOS)\n"
+                                + "  • Converter venv:     " + VENV_DIR);
+            }
+            report("Disk space OK: " + usableGb + " GB available (need ~" + requiredGb + " GB).");
+        } catch (IOException diskErr) {
+            report("Warning: could not check disk space — " + diskErr.getMessage());
+        }
+
+        // 6. Run the conversion
         report("Starting conversion: " + modelId + " → ONNX");
         try {
             Files.createDirectories(outputDir);

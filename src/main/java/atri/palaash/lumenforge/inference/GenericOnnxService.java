@@ -44,7 +44,28 @@ public class GenericOnnxService implements InferenceService {
     private static final Pattern TOKEN_PATTERN = Pattern.compile("'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+");
 
     /* ── Session & Tokenizer Caches ────────────────────────────────── */
-    private static final ConcurrentHashMap<String, OrtSession> SESSION_CACHE = new ConcurrentHashMap<>();
+    /**
+     * Maximum number of ONNX sessions to keep cached simultaneously.
+     * Each session can consume 200 MB – 6 GB+ of native memory, so we
+     * cap the cache to prevent OOM.  An LRU insertion-order policy
+     * evicts the oldest session when this limit is reached.
+     */
+    private static final int MAX_CACHED_SESSIONS = 5;
+    private static final java.util.LinkedHashMap<String, OrtSession> SESSION_CACHE =
+            new java.util.LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, OrtSession> eldest) {
+                    if (size() > MAX_CACHED_SESSIONS) {
+                        try {
+                            System.out.println("[LumenForge] Evicting cached session (LRU): "
+                                    + Path.of(eldest.getKey()).getFileName());
+                            eldest.getValue().close();
+                        } catch (Exception ignored) { }
+                        return true;
+                    }
+                    return false;
+                }
+            };
     private static final ConcurrentHashMap<String, ClipTokenizer> TOKENIZER_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, T5Tokenizer> T5_TOKENIZER_CACHE = new ConcurrentHashMap<>();
     private static volatile String cachedEpKey = "";
@@ -66,7 +87,7 @@ public class GenericOnnxService implements InferenceService {
      * cache a new one. Subsequent inference calls skip expensive model
      * loading and graph optimization — the single biggest performance win.
      */
-    private OrtSession getOrCreateSession(OrtEnvironment env, Path modelPath,
+    private synchronized OrtSession getOrCreateSession(OrtEnvironment env, Path modelPath,
                                            OrtSession.SessionOptions opts) throws OrtException {
         String key = modelPath.toAbsolutePath().toString();
         OrtSession existing = SESSION_CACHE.get(key);
@@ -79,6 +100,22 @@ public class GenericOnnxService implements InferenceService {
         SESSION_CACHE.put(key, session);
         System.out.println("[LumenForge] Session loaded: " + modelPath.getFileName());
         return session;
+    }
+
+    /**
+     * Close and remove a specific session from the cache to free native memory.
+     * Used for sequential model loading in large pipelines (e.g. SD 3.5)
+     * where text encoders are only needed temporarily.
+     */
+    private synchronized void evictSession(Path modelPath) {
+        String key = modelPath.toAbsolutePath().toString();
+        OrtSession session = SESSION_CACHE.remove(key);
+        if (session != null) {
+            try {
+                session.close();
+                System.out.println("[LumenForge] Evicted session: " + modelPath.getFileName());
+            } catch (Exception ignored) { }
+        }
     }
 
     /**
@@ -115,7 +152,7 @@ public class GenericOnnxService implements InferenceService {
      * a fresh start or switches execution providers). Also clears the
      * tokenizer cache.
      */
-    public static void clearCache() {
+    public static synchronized void clearCache() {
         SESSION_CACHE.forEach((k, session) -> {
             try { session.close(); } catch (Exception ignored) { }
         });
@@ -146,7 +183,7 @@ public class GenericOnnxService implements InferenceService {
             try {
                 request.reportProgress("Loading ONNX Runtime environment\u2026");
                 OrtEnvironment environment = OrtEnvironment.getEnvironment();
-                OrtSession.SessionOptions sessionOptions = new OrtSession.SessionOptions();
+                try (OrtSession.SessionOptions sessionOptions = new OrtSession.SessionOptions()) {
                 sessionOptions.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
                 int cpus = Runtime.getRuntime().availableProcessors();
                 sessionOptions.setIntraOpNumThreads(Math.max(1, cpus - 1));
@@ -197,6 +234,7 @@ public class GenericOnnxService implements InferenceService {
                         + providerSelection.noteSuffix();
                 System.out.println("[LumenForge] WARN: " + details);
                 return InferenceResult.fail(details);
+                } // close try(SessionOptions)
             } catch (OrtException ex) {
                 String message = ex.getMessage() == null ? "Unknown ONNX Runtime error" : ex.getMessage();
                 System.out.println("[LumenForge] ERROR: ONNX Runtime error: " + message);
@@ -1019,19 +1057,21 @@ public class GenericOnnxService implements InferenceService {
             long[] t5NegTokens = hasT5 ? tok3.encode(
                     request.negativePrompt() == null ? "" : request.negativePrompt(), 256) : null;
 
-            request.reportProgress("Loading SD 3.x models (transformer, "
-                    + (hasT5 ? "3" : "2") + " text encoders, VAE)…");
-            OrtSession enc1 = getOrCreateSession(environment, textEncoder1Path, sessionOptions);
-            OrtSession enc2 = getOrCreateSession(environment, textEncoder2Path, sessionOptions);
-            OrtSession transformer = getOrCreateSession(environment, transformerPath, sessionOptions);
-            OrtSession vae  = getOrCreateSession(environment, vaeDecoderPath, sessionOptions);
-            OrtSession enc3 = hasT5 ? getOrCreateSession(environment, textEncoder3Path, sessionOptions) : null;
+            // ── Load text encoders sequentially, free each after use ──
+            // SD 3.5 models are large (~12 GB total); loading all at once
+            // can OOM a 16 GB machine. We load → encode → evict each encoder
+            // before moving to the next, keeping peak memory at ~6 GB.
 
-            // ── Encode positive prompt ──
             request.reportProgress("Encoding positive prompt (CLIP-L)…");
+            OrtSession enc1 = getOrCreateSession(environment, textEncoder1Path, sessionOptions);
             float[][][] embed1 = runTextEncoder(environment, enc1, tokens1);
+            float[][] embed1Pooled = runTextEncoderPooled(environment, enc1, tokens1);
+            float[][][] negEmbed1 = runTextEncoder(environment, enc1, negTokens1);
+            float[][] negEmbed1Pooled = runTextEncoderPooled(environment, enc1, negTokens1);
+            evictSession(textEncoder1Path);  // ~250 MB freed
 
             request.reportProgress("Encoding positive prompt (CLIP-G)…");
+            OrtSession enc2 = getOrCreateSession(environment, textEncoder2Path, sessionOptions);
             float[][][] embed2;
             float[][] pooledPos;
             {
@@ -1062,9 +1102,8 @@ public class GenericOnnxService implements InferenceService {
                 } finally { idsTensor.close(); }
             }
 
-            // ── Encode negative prompt ──
-            request.reportProgress("Encoding negative prompt…");
-            float[][][] negEmbed1 = runTextEncoder(environment, enc1, negTokens1);
+            // ── Encode negative prompt (CLIP-G) ──
+            request.reportProgress("Encoding negative prompt (CLIP-G)…");
             float[][][] negEmbed2;
             float[][] pooledNeg;
             {
@@ -1094,6 +1133,7 @@ public class GenericOnnxService implements InferenceService {
                     if (pooledNeg == null) pooledNeg = new float[1][1280];
                 } finally { idsTensor.close(); }
             }
+            evictSession(textEncoder2Path);  // ~1.4 GB freed
 
             // ── Combine CLIP embeddings ──
             // CLIP-L: [1, 77, dim1], CLIP-G: [1, 77, dim2]
@@ -1116,14 +1156,19 @@ public class GenericOnnxService implements InferenceService {
                 System.arraycopy(negEmbed2[0][s], 0, clipNegEmbed[0][s], dim1, dim2);
             }
 
+            // Release raw CLIP embeddings — they've been copied into clipPos/NegEmbed
+            embed1 = null; embed2 = null; negEmbed1 = null; negEmbed2 = null;
+
             // T5 embeddings: real T5-XXL output or zeros fallback
             float[][][] t5PosEmbed;
             float[][][] t5NegEmbed;
-            if (hasT5 && enc3 != null && t5Tokens != null) {
+            if (hasT5 && t5Tokens != null) {
                 request.reportProgress("Encoding positive prompt (T5-XXL)…");
+                OrtSession enc3 = getOrCreateSession(environment, textEncoder3Path, sessionOptions);
                 t5PosEmbed = runT5Encoder(environment, enc3, t5Tokens, t5SeqLen, t5Dim);
                 request.reportProgress("Encoding negative prompt (T5-XXL)…");
                 t5NegEmbed = runT5Encoder(environment, enc3, t5NegTokens, t5SeqLen, t5Dim);
+                evictSession(textEncoder3Path);  // ~4.5 GB freed
             } else {
                 t5PosEmbed = new float[1][t5SeqLen][t5Dim]; // zeros fallback
                 t5NegEmbed = new float[1][t5SeqLen][t5Dim];
@@ -1147,13 +1192,13 @@ public class GenericOnnxService implements InferenceService {
             batchedHidden[0] = encoderHiddenNeg[0];
             batchedHidden[1] = encoderHiddenPos[0];
 
+            // Release per-encoder embedding arrays now that they're combined
+            clipPosEmbed = null; clipNegEmbed = null;
+            t5PosEmbed = null; t5NegEmbed = null;
+            encoderHiddenPos = null; encoderHiddenNeg = null;
+
             // Pooled projections: concat CLIP-L pooled + CLIP-G pooled → [1, 2048]
-            // CLIP-L pooled is embed1[0][0] (take first token hidden state as rough pooled — for proper
-            // pooling we'd need the model's pooler, but using first text encoder output it's already 768-d
-            // hidden state at BOS position). Actually, pooledPos is from CLIP-G which outputs it directly.
-            // We need both CLIP-L pooled + CLIP-G pooled = [768 + 1280] = [2048]
-            float[][] embed1Pooled = runTextEncoderPooled(environment, enc1, tokens1);
-            float[][] negEmbed1Pooled = runTextEncoderPooled(environment, enc1, negTokens1);
+            // embed1Pooled / negEmbed1Pooled already computed during enc1 phase above
 
             int pooledDim = (embed1Pooled != null ? embed1Pooled[0].length : dim1) + pooledPos[0].length;
             float[][] batchedPooled = new float[2][pooledDim];
@@ -1179,6 +1224,14 @@ public class GenericOnnxService implements InferenceService {
                 float t = 1.0f - (float) i / steps; // goes from 1.0 to 0.0
                 sigmas[i] = shiftFactor * t / (1.0f + (shiftFactor - 1.0f) * t);
             }
+
+            // Release pooled arrays after batchedPooled is built
+            embed1Pooled = null; negEmbed1Pooled = null;
+            pooledPos = null; pooledNeg = null;
+
+            // ── Load transformer on-demand (~6 GB) ──
+            request.reportProgress("Loading transformer…");
+            OrtSession transformer = getOrCreateSession(environment, transformerPath, sessionOptions);
 
             request.reportProgress("Denoising: 0/" + steps + " steps (SD 3.x Flow Matching) — EP: " + provider);
             long stepStart = System.currentTimeMillis();
@@ -1282,10 +1335,15 @@ public class GenericOnnxService implements InferenceService {
                 }
             }
 
+            // ── Evict transformer, load VAE on-demand ──
+            evictSession(transformerPath);  // ~6 GB freed
+            batchedHidden = null; batchedPooled = null; // release embedding tensors
+
             // ── Decode with VAE ──
             // SD3 VAE: latent = latent / scaling_factor + shift_factor
             // scaling_factor=1.5305, shift_factor=0.0609
             request.reportProgress("Decoding latents with VAE…");
+            OrtSession vae = getOrCreateSession(environment, vaeDecoderPath, sessionOptions);
             float[][][][] scaledLatents = new float[1][16][latentH][latentW];
             for (int c = 0; c < 16; c++)
                 for (int y = 0; y < latentH; y++)
@@ -2282,7 +2340,11 @@ public class GenericOnnxService implements InferenceService {
         private final Map<String, Integer> vocab;
         private final Map<String, Integer> merges;
         private final Map<Integer, String> byteEncoder;
-        private final Map<String, String> cache = new HashMap<>();
+        private final Map<String, String> cache = new java.util.LinkedHashMap<>(256, 0.75f, true) {
+            @Override protected boolean removeEldestEntry(java.util.Map.Entry<String, String> eldest) {
+                return size() > 10_000;
+            }
+        };
         private final int bos;
         private final int eos;
 
@@ -2861,6 +2923,7 @@ public class GenericOnnxService implements InferenceService {
      * complete lines to a progress callback (for ONNX Runtime log capture).
      */
     private static class TeeOutputStream extends OutputStream {
+        private static final int MAX_LINE_BUFFER = 64 * 1024; // 64 KB guard
         private final PrintStream original;
         private final Consumer<String> callback;
         private final ByteArrayOutputStream lineBuffer = new ByteArrayOutputStream();
@@ -2877,6 +2940,7 @@ public class GenericOnnxService implements InferenceService {
                 flushLine();
             } else {
                 lineBuffer.write(b);
+                if (lineBuffer.size() > MAX_LINE_BUFFER) flushLine();
             }
         }
 
@@ -2888,6 +2952,7 @@ public class GenericOnnxService implements InferenceService {
                     flushLine();
                 } else {
                     lineBuffer.write(buf[i]);
+                    if (lineBuffer.size() > MAX_LINE_BUFFER) flushLine();
                 }
             }
         }

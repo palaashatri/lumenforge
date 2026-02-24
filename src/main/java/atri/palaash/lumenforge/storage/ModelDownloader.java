@@ -309,25 +309,33 @@ public class ModelDownloader {
                 // Use available() + sleep to implement stall detection without
                 // blocking forever inside read().
                 if (inputStream.available() <= 0) {
-                    // Attempt a timed read via a virtual thread so we can enforce the stall timeout.
+                    // Attempt a timed read using a virtual thread we can interrupt on stall.
                     final InputStream is = inputStream;
-                    var readFuture = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                    final int[] readResult = {-1};
+                    final IOException[] readError = {null};
+                    Thread readThread = Thread.ofVirtual().start(() -> {
                         try {
-                            return is.read(buffer);
+                            readResult[0] = is.read(buffer);
                         } catch (IOException e) {
-                            throw new java.util.concurrent.CompletionException(e);
+                            readError[0] = e;
                         }
                     });
                     try {
-                        read = readFuture.get(STALL_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
-                    } catch (java.util.concurrent.TimeoutException te) {
+                        readThread.join(STALL_TIMEOUT_MS);
+                    } catch (InterruptedException ie) {
+                        readThread.interrupt();
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Download interrupted.");
+                    }
+                    if (readThread.isAlive()) {
+                        readThread.interrupt();
+                        // Close the stream to unblock the read thread
+                        try { is.close(); } catch (IOException ignored) {}
                         throw new IOException("Download stalled — no data received for "
                                 + (STALL_TIMEOUT_MS / 1000) + " seconds.");
-                    } catch (java.util.concurrent.ExecutionException ee) {
-                        Throwable cause = ee.getCause();
-                        if (cause instanceof IOException ioe) { throw ioe; }
-                        throw new IOException("Read error", cause);
                     }
+                    if (readError[0] != null) throw readError[0];
+                    read = readResult[0];
                 } else {
                     read = inputStream.read(buffer);
                 }
