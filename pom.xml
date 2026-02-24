@@ -11,13 +11,16 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>21</maven.compiler.release>
+        <!-- Overridden to onnxruntime_gpu on Windows / Linux via profiles -->
+        <ort.artifactId>onnxruntime</ort.artifactId>
+        <ort.version>1.22.0</ort.version>
     </properties>
 
     <dependencies>
         <dependency>
             <groupId>com.microsoft.onnxruntime</groupId>
-            <artifactId>onnxruntime</artifactId>
-            <version>1.22.0</version>
+            <artifactId>${ort.artifactId}</artifactId>
+            <version>${ort.version}</version>
         </dependency>
         <dependency>
             <groupId>com.formdev</groupId>
@@ -109,24 +112,22 @@
     </build>
 
     <profiles>
+        <!--
+          GPU profiles: auto-activate on Windows / Linux so the fat JAR
+          ships with the CUDA execution provider.  On macOS the default
+          onnxruntime (CPU + CoreML) is used instead.
+
+          To force a CPU-only build on Windows/Linux:
+              mvn package -Dort.artifactId=onnxruntime
+        -->
         <profile>
             <id>gpu-windows</id>
             <activation>
-                <os>
-                    <family>Windows</family>
-                </os>
-                <property>
-                    <name>onnx.gpu</name>
-                    <value>true</value>
-                </property>
+                <os><family>Windows</family></os>
             </activation>
-            <dependencies>
-                <dependency>
-                    <groupId>com.microsoft.onnxruntime</groupId>
-                    <artifactId>onnxruntime_gpu</artifactId>
-                    <version>1.22.0</version>
-                </dependency>
-            </dependencies>
+            <properties>
+                <ort.artifactId>onnxruntime_gpu</ort.artifactId>
+            </properties>
         </profile>
         <profile>
             <id>gpu-linux</id>
@@ -135,18 +136,10 @@
                     <family>unix</family>
                     <name>Linux</name>
                 </os>
-                <property>
-                    <name>onnx.gpu</name>
-                    <value>true</value>
-                </property>
             </activation>
-            <dependencies>
-                <dependency>
-                    <groupId>com.microsoft.onnxruntime</groupId>
-                    <artifactId>onnxruntime_gpu</artifactId>
-                    <version>1.22.0</version>
-                </dependency>
-            </dependencies>
+            <properties>
+                <ort.artifactId>onnxruntime_gpu</ort.artifactId>
+            </properties>
         </profile>
         <!-- DJL + PyTorch backend (activate with -Ddjl=true) -->
         <profile>

@@ -2600,8 +2600,22 @@ public class GenericOnnxService implements InferenceService {
         }
     }
 
+    /**
+     * Build the EP preference list for the current platform, try each in order,
+     * and return the first one that the loaded ONNX Runtime native library supports.
+     *
+     * <p>Priority order per platform (highest → lowest):
+     * <ul>
+     *   <li><b>macOS</b>: CoreML (GPU+ANE+CPU) → CPU</li>
+     *   <li><b>Windows</b>: TensorRT-RTX → TensorRT → CUDA → DirectML → OpenVINO → CPU</li>
+     *   <li><b>Linux</b>: TensorRT → CUDA → ROCm → OpenVINO → CPU</li>
+     * </ul>
+     *
+     * <p>Override with {@code -Dlumenforge.ep=cuda} (or any key) to force a specific EP.
+     */
     private ProviderSelection configureExecutionProvider(OrtSession.SessionOptions options, boolean preferGpu) {
         String os = System.getProperty("os.name", "unknown").toLowerCase();
+        String arch = System.getProperty("os.arch", "unknown").toLowerCase();
         String forced = System.getProperty("lumenforge.ep", "").trim().toLowerCase();
 
         List<String> preference = new ArrayList<>();
@@ -2614,50 +2628,99 @@ public class GenericOnnxService implements InferenceService {
             preference.add("coreml");
             preference.add("cpu");
         } else if (os.contains("win")) {
-            preference.add("directml");
-            preference.add("cuda");
+            preference.add("tensorrt_rtx");   // RTX 30xx+ (Ampere+)
+            preference.add("tensorrt");        // any NVIDIA with TensorRT libs
+            preference.add("cuda");            // CUDA fallback
+            preference.add("directml");        // AMD / Intel / any DX12 GPU
+            preference.add("openvino");        // Intel CPUs/GPUs/NPUs
             preference.add("cpu");
         } else {
+            // Linux
+            preference.add("tensorrt");
             preference.add("cuda");
-            preference.add("rocm");
+            preference.add("rocm");            // AMD GPUs
+            preference.add("openvino");
             preference.add("cpu");
         }
 
         StringBuilder notes = new StringBuilder();
+        System.out.println("[LumenForge] EP preference order: " + preference);
+
         for (String candidate : preference) {
             if ("cpu".equals(candidate)) {
+                System.out.println("[LumenForge] Using CPUExecutionProvider");
                 return new ProviderSelection("CPUExecutionProvider", notes.toString());
             }
             if (tryEnableProvider(options, candidate, notes)) {
-                return new ProviderSelection(providerDisplayName(candidate), notes.toString());
+                String display = providerDisplayName(candidate);
+                System.out.println("[LumenForge] \u2713 Enabled " + display);
+                return new ProviderSelection(display, notes.toString());
             }
         }
+        System.out.println("[LumenForge] No GPU EP available, falling back to CPU");
         return new ProviderSelection("CPUExecutionProvider", notes.toString());
     }
 
     private boolean tryEnableProvider(OrtSession.SessionOptions options, String candidate, StringBuilder notes) {
+        boolean ok = false;
         try {
-            return switch (candidate) {
-                case "cuda" -> invokeNoArg(options, "addCUDA");
-                case "directml" -> invokeNoArg(options, "addDirectML") || invokeIntArg(options, "addDirectML", 0);
+            ok = switch (candidate) {
+
+                /* ── NVIDIA ───────────────────────────────────────────── */
+                case "tensorrt_rtx" ->
+                    // NvTensorRtRtxExecutionProvider – RTX 30xx+ only
+                    // Java method not yet in stock Maven artifacts; try reflection just in case
+                    invokeNoArg(options, "addNvTensorRtRtx")
+                    || invokeIntArg(options, "addNvTensorRtRtx", 0);
+
+                case "tensorrt" ->
+                    // TensorrtExecutionProvider – available in onnxruntime_gpu
+                    invokeIntArg(options, "addTensorrt", 0)
+                    || invokeNoArg(options, "addTensorrt");
+
+                case "cuda" ->
+                    invokeNoArg(options, "addCUDA");
+
+                /* ── Apple ────────────────────────────────────────────── */
                 case "coreml" -> {
-                    // Flags: COREML_FLAG_USE_CPU_AND_GPU (1) enables all ANE/GPU subgraphs
-                    boolean ok = invokeIntArg(options, "addCoreML", 1);
-                    if (!ok) { ok = invokeNoArg(options, "addCoreML"); }
-                    if (!ok) { ok = invokeIntArg(options, "addCoreML", 0); }
-                    yield ok;
+                    // addCoreML(long flags) — note: parameter is long, not int!
+                    // Flag 0x0 = ALL compute units (CPU+GPU+ANE — best for M-series)
+                    boolean coreOk = invokeLongArg(options, "addCoreML", 0L);
+                    if (!coreOk) { coreOk = invokeNoArg(options, "addCoreML"); }
+                    yield coreOk;
                 }
-                case "rocm" -> invokeNoArg(options, "addROCM");
+
+                /* ── Microsoft ────────────────────────────────────────── */
+                case "directml" ->
+                    invokeIntArg(options, "addDirectML", 0)
+                    || invokeNoArg(options, "addDirectML");
+
+                /* ── Intel ────────────────────────────────────────────── */
+                case "openvino" ->
+                    // addOpenVINO(String) — device type "GPU" preferred, "CPU" fallback
+                    invokeStringArg(options, "addOpenVINO", "GPU")
+                    || invokeStringArg(options, "addOpenVINO", "CPU")
+                    || invokeNoArg(options, "addOpenVINO");
+
+                /* ── AMD ──────────────────────────────────────────────── */
+                case "rocm" ->
+                    invokeNoArg(options, "addROCM");
+
                 default -> false;
             };
         } catch (Exception ex) {
-            if (!notes.isEmpty()) {
-                notes.append("; ");
-            }
-            notes.append(candidate).append(" unavailable");
-            return false;
+            ok = false;
         }
+
+        if (!ok) {
+            if (!notes.isEmpty()) { notes.append("; "); }
+            notes.append(candidate).append(" not available");
+            System.out.println("[LumenForge]   \u2717 " + candidate + " not available");
+        }
+        return ok;
     }
+
+    /* ── Reflection helpers for EP registration ──────────────────────── */
 
     private boolean invokeNoArg(OrtSession.SessionOptions options, String methodName) {
         try {
@@ -2677,13 +2740,34 @@ public class GenericOnnxService implements InferenceService {
         }
     }
 
+    private boolean invokeLongArg(OrtSession.SessionOptions options, String methodName, long arg) {
+        try {
+            options.getClass().getMethod(methodName, long.class).invoke(options, arg);
+            return true;
+        } catch (Exception ex) {
+            return false;
+        }
+    }
+
+    private boolean invokeStringArg(OrtSession.SessionOptions options, String methodName, String arg) {
+        try {
+            options.getClass().getMethod(methodName, String.class).invoke(options, arg);
+            return true;
+        } catch (Exception ex) {
+            return false;
+        }
+    }
+
     private String providerDisplayName(String candidate) {
         return switch (candidate) {
-            case "cuda" -> "CUDAExecutionProvider";
-            case "directml" -> "DmlExecutionProvider";
-            case "coreml" -> "CoreMLExecutionProvider";
-            case "rocm" -> "ROCMExecutionProvider";
-            default -> "CPUExecutionProvider";
+            case "tensorrt_rtx" -> "NvTensorRtRtxExecutionProvider";
+            case "tensorrt"     -> "TensorrtExecutionProvider";
+            case "cuda"         -> "CUDAExecutionProvider";
+            case "coreml"       -> "CoreMLExecutionProvider";
+            case "directml"     -> "DmlExecutionProvider";
+            case "openvino"     -> "OpenVINOExecutionProvider";
+            case "rocm"         -> "ROCMExecutionProvider";
+            default             -> "CPUExecutionProvider";
         };
     }
 
