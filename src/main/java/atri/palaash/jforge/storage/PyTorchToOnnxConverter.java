@@ -40,9 +40,23 @@ public class PyTorchToOnnxConverter {
 
     private static final String PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/";
 
-    /** Packages installed into the venv before conversion. */
+    /**
+     * Packages installed into the managed venv before conversion.
+     *
+     * <p>IMPORTANT: use {@code optimum[exporters]}, NOT {@code optimum[onnxruntime]}.
+     * The {@code exporters} extra provides {@code optimum.exporters.onnx.main_export};
+     * {@code onnxruntime} only adds the runtime inference classes.
+     */
     private static final String[] REQUIRED_PACKAGES = {
-            "torch", "onnx", "diffusers", "transformers", "accelerate", "optimum[exporters]"
+            "torch",
+            "onnx",
+            "onnxruntime",
+            "diffusers",
+            "transformers",
+            "accelerate",
+            "huggingface_hub",
+            "sentencepiece",
+            "optimum[exporters]>=1.19.0"
     };
 
     private final Consumer<String> progressCallback;
@@ -164,19 +178,27 @@ public class PyTorchToOnnxConverter {
      * @throws ConversionException     if any step fails
      */
     public Path convert(String modelId, Path outputDir, String mode) {
-        return convert(modelId, outputDir, mode, null);
+        return convert(modelId, outputDir, mode, null, false);
+    }
+
+    /** @see #convert(String, Path, String, String, boolean) */
+    public Path convert(String modelId, Path outputDir, String mode, String hfToken) {
+        return convert(modelId, outputDir, mode, hfToken, false);
     }
 
     /**
-     * Run the full PyTorch → ONNX conversion with optional HuggingFace auth token.
+     * Run the full PyTorch → ONNX conversion.
      *
-     * @param modelId   HuggingFace model ID or local path to a .pt/.pth file
-     * @param outputDir directory to write converted ONNX file(s)
-     * @param mode      {@code "diffusers"} or {@code "generic"}
-     * @param hfToken   HuggingFace auth token for gated models (may be null)
+     * @param modelId    HuggingFace model ID or local path to a .pt/.pth file
+     * @param outputDir  directory to write converted ONNX file(s)
+     * @param mode       {@code "diffusers"} or {@code "generic"}
+     * @param hfToken    HuggingFace auth token for gated models (may be null)
+     * @param reinstall  if {@code true}, pass {@code --reinstall} to the Python script to
+     *                   force-reinstall {@code optimum[exporters]} — fixes broken/partial installs.
      * @return the output directory on success
      */
-    public Path convert(String modelId, Path outputDir, String mode, String hfToken) {
+    public Path convert(String modelId, Path outputDir, String mode,
+                        String hfToken, boolean reinstall) {
         // 1. Locate Python
         String pythonCmd = findPython();
         if (pythonCmd == null) {
@@ -200,12 +222,13 @@ public class PyTorchToOnnxConverter {
         report("Installing Python dependencies (first run may take several minutes)…");
         String venvPython = getVenvPython().toString();
         runProcess(venvPython, "-m", "pip", "install", "--upgrade", "pip");
-        String[] installCmd = new String[REQUIRED_PACKAGES.length + 4];
+        String[] installCmd = new String[REQUIRED_PACKAGES.length + 5];
         installCmd[0] = venvPython;
         installCmd[1] = "-m";
         installCmd[2] = "pip";
         installCmd[3] = "install";
-        System.arraycopy(REQUIRED_PACKAGES, 0, installCmd, 4, REQUIRED_PACKAGES.length);
+        installCmd[4] = "--upgrade";
+        System.arraycopy(REQUIRED_PACKAGES, 0, installCmd, 5, REQUIRED_PACKAGES.length);
         runProcess(installCmd);
         report("Dependencies ready.");
 
@@ -243,7 +266,9 @@ public class PyTorchToOnnxConverter {
             throw new ConversionException("Cannot create output directory: " + ex.getMessage());
         }
 
-        runConversionScript(venvPython, scriptPath, modelId, outputDir, mode, hfToken);
+        // 6b. Run the conversion
+        runConversionScript(venvPython, scriptPath, modelId, outputDir, mode,
+                            hfToken, reinstall);
 
         // 7. Post-conversion cleanup — reclaim disk space from intermediate caches
         cleanupAfterConversion(modelId, venvPython);
@@ -387,25 +412,36 @@ public class PyTorchToOnnxConverter {
 
     /**
      * Run the conversion script and parse PROGRESS / ERROR lines from stdout.
+     *
+     * @param reinstall if {@code true}, pass {@code --reinstall} to force-reinstall
+     *                  {@code optimum[exporters]} before the conversion starts.
      */
     private void runConversionScript(String python, Path script,
                                      String modelId, Path outputDir, String mode,
-                                     String hfToken) {
+                                     String hfToken, boolean reinstall) {
         try {
-            ProcessBuilder pb = new ProcessBuilder(
+            // Build command list
+            java.util.List<String> cmdList = new java.util.ArrayList<>(java.util.List.of(
                     python,
                     script.toString(),
                     "--model_id", modelId,
                     "--output_dir", outputDir.toString(),
                     "--mode", mode
-            );
-            // Pass HF token as both env var and CLI arg for gated models
+            ));
+            // Pass HF token via CLI arg for gated models
+            if (hfToken != null && !hfToken.isBlank()) {
+                cmdList.add("--hf_token");
+                cmdList.add(hfToken);
+            }
+            // --reinstall forces force-reinstall of optimum[exporters]
+            if (reinstall) {
+                cmdList.add("--reinstall");
+            }
+            ProcessBuilder pb = new ProcessBuilder(cmdList);
+            // Also expose token as env vars
             if (hfToken != null && !hfToken.isBlank()) {
                 pb.environment().put("HF_TOKEN", hfToken);
                 pb.environment().put("HUGGING_FACE_HUB_TOKEN", hfToken);
-                // Append --hf_token arg
-                pb.command().add("--hf_token");
-                pb.command().add(hfToken);
             }
             pb.redirectErrorStream(true);
             Process process = pb.start();
@@ -495,7 +531,7 @@ public class PyTorchToOnnxConverter {
             #!/usr/bin/env python3
             # JForge PyTorch → ONNX converter (embedded fallback)
             # Full version: scripts/convert_pytorch_to_onnx.py
-            import argparse, sys
+            import argparse, subprocess, sys
             from pathlib import Path
 
             def p(pct, msg):
@@ -505,63 +541,107 @@ public class PyTorchToOnnxConverter {
                 print(f"ERROR: {msg}", flush=True)
                 sys.exit(1)
 
-            def convert_diffusers(mid, out):
+            def get_optimum_info(field):
+                try:
+                    out = subprocess.run([sys.executable,"-m","pip","show","optimum"],
+                                        capture_output=True,text=True,timeout=15).stdout
+                    for line in out.splitlines():
+                        if line.startswith(field+":"):
+                            return line.split(":",1)[1].strip()
+                except Exception:
+                    pass
+                return "unknown"
+
+            def reinstall_optimum():
+                p(2,"Force-reinstalling optimum[exporters]…")
+                subprocess.check_call([sys.executable,"-m","pip","install",
+                    "--force-reinstall","--no-cache-dir","optimum[exporters]>=1.19.0"])
+                p(4,"optimum[exporters] reinstalled.")
+
+            def import_main_export():
                 try:
                     from optimum.exporters.onnx import main_export
-                except ImportError:
-                    err("optimum[exporters] not installed")
-                p(10, f"Exporting {mid}…")
-                for task in ("stable-diffusion-xl", "stable-diffusion"):
+                    return main_export
+                except ImportError as e1:
+                    pass
+                try:
+                    from optimum.onnx import main_export
+                    return main_export
+                except ImportError as e2:
+                    pass
+                ver = get_optimum_info("Version")
+                loc = get_optimum_info("Location")
+                err(f"Cannot import optimum ONNX exporter.\\n"
+                    f"  optimum version  : {ver}\\n"
+                    f"  optimum location : {loc}\\n"
+                    f"Fix: pip install --force-reinstall 'optimum[exporters]>=1.19.0'\\n"
+                    f"Or re-run with --reinstall flag.")
+
+            def convert_diffusers(mid, out):
+                p(5,"Importing optimum exporters…")
+                main_export = import_main_export()
+                p(10,f"Exporting {mid}…")
+                tasks = ["auto","text-to-video","stable-diffusion-xl","stable-diffusion"]
+                last = None
+                for task in tasks:
                     try:
-                        p(20, f"Trying task={task}…")
-                        main_export(model_name_or_path=mid, output=Path(out), task=task, fp16=False)
-                        p(100, f"Done (task={task})")
+                        p(20,f"Trying task={task}…")
+                        main_export(model_name_or_path=mid,output=Path(out),task=task,fp16=False)
+                        p(100,f"Done (task={task})")
                         return
                     except Exception as e:
-                        if "task" in str(e).lower() or "not supported" in str(e).lower():
-                            continue
-                        err(str(e))
-                err("No compatible export task found")
+                        last = e
+                        p(15,f"Task '{task}' failed ({e}) — trying next…")
+                hint = ""
+                ml = mid.lower()
+                if "vilab" in ml or "text-to-video" in ml or "t2v" in ml:
+                    hint = ("\\nHint: text-to-video models use a custom UNet3D not yet "
+                            "in optimum's registry; consider running inference via "
+                            "the diffusers pipeline directly.")
+                err(f"No compatible export task found. Last error: {last}{hint}")
 
             def convert_generic(mp, out, shape):
                 try:
-                    import torch, torch.onnx
+                    import torch,torch.onnx
                 except ImportError:
-                    err("torch not installed")
-                p(10, "Loading model…")
+                    err("torch not installed — pip install torch")
+                p(10,"Loading model…")
                 try:
-                    m = torch.load(mp, map_location="cpu", weights_only=False)
+                    m = torch.load(mp,map_location="cpu",weights_only=False)
                 except Exception as e:
                     err(f"Failed to load: {e}")
-                if isinstance(m, dict):
+                if isinstance(m,dict):
                     err("state_dict only — use --mode diffusers for HF models")
-                if not hasattr(m, "forward"):
+                if not hasattr(m,"forward"):
                     err("No forward() method")
                 m.eval()
                 s = [int(x) for x in shape.split(",")]
-                op = Path(out) / "model.onnx"
-                op.parent.mkdir(parents=True, exist_ok=True)
-                p(50, "Running torch.onnx.export()…")
+                op = Path(out)/"model.onnx"
+                op.parent.mkdir(parents=True,exist_ok=True)
+                p(50,"Running torch.onnx.export()…")
                 try:
-                    torch.onnx.export(m, torch.randn(*s), str(op), export_params=True,
-                                      opset_version=17, do_constant_folding=True,
-                                      input_names=["modelInput"], output_names=["modelOutput"],
-                                      dynamic_axes={"modelInput":{0:"batch"}, "modelOutput":{0:"batch"}})
+                    torch.onnx.export(m,torch.randn(*s),str(op),export_params=True,
+                        opset_version=17,do_constant_folding=True,
+                        input_names=["modelInput"],output_names=["modelOutput"],
+                        dynamic_axes={"modelInput":{0:"batch"},"modelOutput":{0:"batch"}})
                 except Exception as e:
                     err(f"torch.onnx.export() failed: {e}")
-                p(100, "Done")
+                p(100,"Done")
 
-            if __name__ == "__main__":
+            if __name__=="__main__":
                 ap = argparse.ArgumentParser()
-                ap.add_argument("--model_id", required=True)
-                ap.add_argument("--output_dir", required=True)
-                ap.add_argument("--mode", default="diffusers")
-                ap.add_argument("--input_shape", default="1,3,224,224")
+                ap.add_argument("--model_id",required=True)
+                ap.add_argument("--output_dir",required=True)
+                ap.add_argument("--mode",default="diffusers")
+                ap.add_argument("--input_shape",default="1,3,224,224")
+                ap.add_argument("--reinstall",action="store_true")
                 a = ap.parse_args()
-                Path(a.output_dir).mkdir(parents=True, exist_ok=True)
-                if a.mode == "diffusers":
-                    convert_diffusers(a.model_id, a.output_dir)
+                Path(a.output_dir).mkdir(parents=True,exist_ok=True)
+                if a.reinstall:
+                    reinstall_optimum()
+                if a.mode=="diffusers":
+                    convert_diffusers(a.model_id,a.output_dir)
                 else:
-                    convert_generic(a.model_id, a.output_dir, a.input_shape)
+                    convert_generic(a.model_id,a.output_dir,a.input_shape)
             """;
 }

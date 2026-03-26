@@ -48,6 +48,9 @@ public class ModelRegistry {
                 } else if (descriptor.taskType() == TaskType.IMAGE_UPSCALE) {
                     byTask.computeIfAbsent(TaskType.IMAGE_UPSCALE, ignored -> new ArrayList<>())
                           .add(descriptor);
+                } else if (descriptor.taskType() == TaskType.TEXT_TO_VIDEO) {
+                    byTask.computeIfAbsent(TaskType.TEXT_TO_VIDEO, ignored -> new ArrayList<>())
+                          .add(descriptor);
                 }
                 added++;
             }
@@ -72,8 +75,21 @@ public class ModelRegistry {
             "https://huggingface.co/imgdesignart/realesrgan-x4-onnx/resolve/main/onnx/model.onnx",
             "Auto-downloads Real-ESRGAN ONNX model."));
 
+        List<ModelDescriptor> textToVideo = new ArrayList<>();
+        // ali-vilab is the canonical/active org for this model; damo-vilab is deprecated.
+        // The converter uses a custom per-component export (text_encoder, unet3d, vae_decoder)
+        // since the UNet3D architecture is not in optimum's task registry.
+        textToVideo.add(new ModelDescriptor(
+            "ali-vilab/text-to-video-ms-1.7b",
+            "ModelScope Text-to-Video 1.7B",
+            TaskType.TEXT_TO_VIDEO,
+            "text-video/ali-vilab/text-to-video-ms-1.7b/unet/model.onnx",
+            "hf-pytorch://ali-vilab/text-to-video-ms-1.7b",
+            "Downloads PyTorch weights and exports each component (text encoder, UNet3D, VAE) to ONNX."));
+
         byTask.put(TaskType.TEXT_TO_IMAGE, textToImage);
         byTask.put(TaskType.IMAGE_UPSCALE, imageUpscale);
+        byTask.put(TaskType.TEXT_TO_VIDEO, textToVideo);
 
         /* Pipeline component assets for SD v1.5 (shown in Model Manager, not in workflow combos) */
         downloadableAssets.add(new ModelDescriptor("sd_v15_text_encoder", "SD v1.5 Text Encoder ONNX", TaskType.TEXT_TO_IMAGE,

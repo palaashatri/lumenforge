@@ -1,0 +1,51 @@
+# JForge PyTorch → ONNX Converter — Docker image
+#
+# Build:
+#   docker build -f scripts/Dockerfile.converter -t jforge-converter .
+#
+# Run (text-to-video example):
+#   docker run --rm \
+#     -v ~/.jforge-models:/models \
+#     -v ~/.cache/huggingface:/root/.cache/huggingface \
+#     jforge-converter \
+#       --model_id ali-vilab/text-to-video-ms-1.7b \
+#       --output_dir /models/text-video/converted/t2v-ms-17b
+#
+# Run (Stable Diffusion example):
+#   docker run --rm \
+#     -v ~/.jforge-models:/models \
+#     -v ~/.cache/huggingface:/root/.cache/huggingface \
+#     jforge-converter \
+#       --model_id runwayml/stable-diffusion-v1-5 \
+#       --output_dir /models/text-image/converted/sd-v15
+#
+# Pass a HuggingFace token for gated models:
+#   docker run --rm -e HF_TOKEN=hf_xxx \
+#     -v ~/.jforge-models:/models \
+#     -v ~/.cache/huggingface:/root/.cache/huggingface \
+#     jforge-converter \
+#       --model_id stabilityai/stable-diffusion-3.5-large \
+#       --hf_token hf_xxx \
+#       --output_dir /models/text-image/converted/sd35-large
+
+FROM python:3.11-slim
+
+# System dependencies for torch + optimum
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies first (layer-cached unless requirements change)
+COPY scripts/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the converter script
+COPY scripts/convert_pytorch_to_onnx.py ./convert_pytorch_to_onnx.py
+
+# Default output directory (should be bind-mounted from host)
+VOLUME ["/models"]
+
+ENTRYPOINT ["python", "convert_pytorch_to_onnx.py"]

@@ -151,7 +151,7 @@ public class TextToImagePanel extends JPanel {
         cancelButton = new JButton("Cancel");
         cancelButton.setEnabled(false);
         cancelButton.setToolTipText("Cancel the current generation");
-        saveButton = new JButton("Save Output");
+        saveButton = new JButton("Save Result");
         saveButton.setEnabled(false);
 
         progressBar = new JProgressBar();
@@ -297,10 +297,10 @@ public class TextToImagePanel extends JPanel {
         JPanel previewCard = new JPanel(new BorderLayout(8, 8));
         previewCard.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         previewCard.add(new JScrollPane(outputPreview), BorderLayout.CENTER);
-        tabs.addTab("Output", previewCard);
+        tabs.addTab("Output Preview", previewCard);
+        tabs.addTab("Generation Log", new JScrollPane(logArea));
+        tabs.addTab("Prompt Library", promptLibraryPanel);
         tabs.addTab("History", historyPanel);
-        tabs.addTab("Library", promptLibraryPanel);
-        tabs.addTab("Log", new JScrollPane(logArea));
         bottom.add(tabs, BorderLayout.CENTER);
 
         add(top, BorderLayout.NORTH);

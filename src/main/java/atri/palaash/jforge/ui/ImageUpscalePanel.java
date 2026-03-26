@@ -151,7 +151,7 @@ public class ImageUpscalePanel extends JPanel {
         cancelButton = new JButton("Cancel");
         cancelButton.setEnabled(false);
         cancelButton.setToolTipText("Cancel the current upscale operation");
-        saveButton = new JButton("Save Output");
+        saveButton = new JButton("Save Result");
         saveButton.setEnabled(false);
 
         progressBar = new JProgressBar();
@@ -285,8 +285,8 @@ public class ImageUpscalePanel extends JPanel {
         JPanel afterPanel  = borderedPreview("After", afterPreview);
         previewCard.add(beforePanel);
         previewCard.add(afterPanel);
-        tabs.addTab("Preview", new JScrollPane(previewCard));
-        tabs.addTab("Log", new JScrollPane(logArea));
+        tabs.addTab("Output Preview", new JScrollPane(previewCard));
+        tabs.addTab("Generation Log", new JScrollPane(logArea));
         bottom.add(tabs, BorderLayout.CENTER);
 
         add(top, BorderLayout.NORTH);

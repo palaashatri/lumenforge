@@ -2339,7 +2339,7 @@ public class GenericOnnxService implements InferenceService {
         return Math.round(clipped * 255f);
     }
 
-    private static final class ClipTokenizer {
+    static final class ClipTokenizer {
         private final Map<String, Integer> vocab;
         private final Map<String, Integer> merges;
         private final Map<Integer, String> byteEncoder;

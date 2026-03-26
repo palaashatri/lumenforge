@@ -35,6 +35,7 @@ public class TextToVideoPanel extends JPanel {
     private final JSlider fpsSlider;
     private final JComboBox<String> motionBox;
     private final JComboBox<String> styleBox;
+    private final JComboBox<ModelDescriptor> modelCombo;
     private final JCheckBox upscaleCheck;
     private final JCheckBox interpolateCheck;
     
@@ -51,11 +52,23 @@ public class TextToVideoPanel extends JPanel {
     private AtomicBoolean cancellationFlag;
     private static final Pattern STEP_PATTERN = Pattern.compile("Denoising:\\s*(\\d+)/(\\d+)");
 
-    public TextToVideoPanel(InferenceService inferenceService, ModelStorage modelStorage, ModelDownloader modelDownloader) {
+    public TextToVideoPanel(java.util.List<ModelDescriptor> models, InferenceService inferenceService, ModelStorage modelStorage, ModelDownloader modelDownloader) {
         super(new BorderLayout());
         this.inferenceService = inferenceService;
         this.modelStorage = modelStorage;
         this.modelDownloader = modelDownloader;
+
+        modelCombo = new JComboBox<>(models.toArray(new ModelDescriptor[0]));
+        modelCombo.setRenderer((list, value, idx, sel, focus) -> {
+            JLabel lbl = new JLabel(value == null ? "" : value.displayName());
+            lbl.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
+            if (sel) {
+                lbl.setBackground(list.getSelectionBackground());
+                lbl.setForeground(list.getSelectionForeground());
+                lbl.setOpaque(true);
+            }
+            return lbl;
+        });
 
         promptField = new JTextArea(3, 40);
         promptField.setLineWrap(true);
@@ -97,7 +110,7 @@ public class TextToVideoPanel extends JPanel {
         runButton = new JButton("Generate Video");
         cancelButton = new JButton("Cancel");
         cancelButton.setEnabled(false);
-        saveButton = new JButton("Save Video");
+        saveButton = new JButton("Save Result");
         saveButton.setEnabled(false);
 
         progressBar = new JProgressBar();
@@ -155,7 +168,8 @@ public class TextToVideoPanel extends JPanel {
         top.add(negRow);
         top.add(Box.createVerticalStrut(8));
 
-        JPanel topGrid = new JPanel(new GridLayout(1, 3, 10, 0));
+        JPanel topGrid = new JPanel(new GridLayout(1, 4, 10, 0));
+        topGrid.add(labeled("Model", modelCombo));
         topGrid.add(labeled("Resolution", resolutionBox));
         topGrid.add(labeled("Duration (s)", durationSlider));
         topGrid.add(labeled("FPS", fpsSlider));
@@ -219,15 +233,12 @@ public class TextToVideoPanel extends JPanel {
         outputPreview.setText("");
         cancellationFlag = new AtomicBoolean(false);
 
-        String rawId = "damo-vilab/text-to-video-ms-1.7b";
-        ModelDescriptor videoModel = new ModelDescriptor(
-                "hf_pt_damo_text_to_video", 
-                "ModelScope T2V", 
-                TaskType.TEXT_TO_VIDEO, 
-                "video/converted-damo-vilab-text-to-video/unet/model.onnx", 
-                "hf-pytorch://" + rawId, 
-                "Offline text-to-video generator."
-        );
+        ModelDescriptor videoModel = (ModelDescriptor) modelCombo.getSelectedItem();
+        if (videoModel == null) {
+            statusLabel.setText("No model selected.");
+            return;
+        }
+        String rawId = videoModel.sourceUrl().replace("hf-pytorch://", "").replace("hf://", "");
         
         String motion = (String) motionBox.getSelectedItem();
         String style = (String) styleBox.getSelectedItem();
@@ -246,7 +257,7 @@ public class TextToVideoPanel extends JPanel {
                 PyTorchToOnnxConverter converter = new PyTorchToOnnxConverter(
                         msg -> SwingUtilities.invokeLater(() -> appendLog("Converter: " + msg))
                 );
-                return converter.convert(rawId, outputDir, "generic"); 
+                return converter.convert(rawId, outputDir, "diffusers"); 
             }).whenComplete((path, error) -> SwingUtilities.invokeLater(() -> {
                 if (error != null) {
                     setRunning(false, "Conversion Failed");
@@ -358,6 +369,13 @@ public class TextToVideoPanel extends JPanel {
         p.add(tinyLabel(text), BorderLayout.NORTH);
         p.add(comp, BorderLayout.CENTER);
         return p;
+    }
+
+    public void updateModels(java.util.List<ModelDescriptor> newModels) {
+        modelCombo.removeAllItems();
+        for (ModelDescriptor m : newModels) {
+            modelCombo.addItem(m);
+        }
     }
 
     private static void cap(JPanel panel, int height) {

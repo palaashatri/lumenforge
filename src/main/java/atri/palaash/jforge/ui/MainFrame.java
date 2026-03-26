@@ -51,9 +51,7 @@ import java.util.stream.Collectors;
 public class MainFrame extends JFrame {
 
     /* Card names */
-    private static final String CARD_GENERATE = "Generate";
-    private static final String CARD_IMG2IMG  = "Img2Img";
-    private static final String CARD_UPSCALE  = "Upscale";
+    private static final String CARD_IMAGE_STUDIO = "Image Studio";
     private static final String CARD_MODELS   = "Models";
 
     private final CardLayout cardLayout = new CardLayout();
@@ -63,11 +61,13 @@ public class MainFrame extends JFrame {
     private final TextToVideoPanel textToVideoPanel;
     private final ImageUpscalePanel imageUpscalePanel;
     private final Img2ImgPanel img2ImgPanel;
+    private final ImageStudioPanel imageStudioPanel;
     private final ModelManagerPanel modelManagerPanel;
     private final JLabel statusBarLabel;
 
     /* Sidebar lists */
-    private JList<String> workflowList;
+    private JList<String> imageList;
+    private JList<String> videoList;
     private JList<String> managementList;
 
     /* GPU state (shared across panels via supplier) */
@@ -95,9 +95,13 @@ public class MainFrame extends JFrame {
                 .filter(m -> m.taskType() == TaskType.IMAGE_TO_IMAGE)
                 .collect(Collectors.toList());
 
+        List<ModelDescriptor> t2vModels = registry.allModels().stream()
+                .filter(m -> m.taskType() == TaskType.TEXT_TO_VIDEO)
+                .collect(Collectors.toList());
+
         textToImagePanel = new TextToImagePanel(
                 t2iModels, downloader, services.get(TaskType.TEXT_TO_IMAGE));
-        textToVideoPanel = new TextToVideoPanel(services.get(TaskType.TEXT_TO_VIDEO), storage, downloader);
+        textToVideoPanel = new TextToVideoPanel(t2vModels, services.get(TaskType.TEXT_TO_VIDEO), storage, downloader);
         imageUpscalePanel = new ImageUpscalePanel(
                 upscaleModels, downloader, services.get(TaskType.IMAGE_UPSCALE));
         img2ImgPanel = new Img2ImgPanel(
@@ -137,23 +141,33 @@ public class MainFrame extends JFrame {
                     registry.allModels().stream()
                             .filter(m -> m.taskType() == TaskType.IMAGE_TO_IMAGE)
                             .collect(Collectors.toList()));
+            textToVideoPanel.updateModels(
+                    registry.allModels().stream()
+                            .filter(m -> m.taskType() == TaskType.TEXT_TO_VIDEO)
+                            .collect(Collectors.toList()));
         });
 
         /* ── Content cards ─────────────────────────────────────── */
-        contentPanel.add(textToImagePanel, CARD_GENERATE);
-        contentPanel.add(textToVideoPanel, "Video");
-        contentPanel.add(img2ImgPanel,     CARD_IMG2IMG);
-        contentPanel.add(imageUpscalePanel, CARD_UPSCALE);
+        imageStudioPanel = new ImageStudioPanel(textToImagePanel, img2ImgPanel, imageUpscalePanel);
+        contentPanel.add(imageStudioPanel, CARD_IMAGE_STUDIO);
+        contentPanel.add(textToVideoPanel, "Video Studio");
         contentPanel.add(modelManagerPanel, CARD_MODELS);
 
         /* ── Sidebar ─────────────────────────────────────────────── */
-        // Create both lists first, then wire listeners
-        String[] workflowItems = {CARD_GENERATE, "Video", CARD_IMG2IMG, CARD_UPSCALE};
-        workflowList = new JList<>(workflowItems);
-        workflowList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        workflowList.setFixedCellHeight(32);
-        workflowList.setCellRenderer(new SidebarRenderer());
-        workflowList.setOpaque(false);
+        // Create all lists first, then wire listeners
+        String[] imageItems = {CARD_IMAGE_STUDIO};
+        imageList = new JList<>(imageItems);
+        imageList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        imageList.setFixedCellHeight(32);
+        imageList.setCellRenderer(new SidebarRenderer());
+        imageList.setOpaque(false);
+
+        String[] videoItems = {"Video Studio"};
+        videoList = new JList<>(videoItems);
+        videoList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        videoList.setFixedCellHeight(32);
+        videoList.setCellRenderer(new SidebarRenderer());
+        videoList.setOpaque(false);
 
         String[] managementItems = {CARD_MODELS};
         managementList = new JList<>(managementItems);
@@ -163,21 +177,31 @@ public class MainFrame extends JFrame {
         managementList.setOpaque(false);
 
         // Wire listeners after all lists exist
-        workflowList.addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting() && workflowList.getSelectedIndex() >= 0) {
-                managementList.clearSelection();
-                cardLayout.show(contentPanel, workflowList.getSelectedValue());
+        imageList.addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting() && imageList.getSelectedIndex() >= 0) {
+                String val = imageList.getSelectedValue();
+                switchToCard(val, imageList, imageList.getSelectedIndex());
+                if (!val.equals("Video Studio")) videoList.clearSelection();
+                if (!val.equals(CARD_MODELS)) managementList.clearSelection();
+            }
+        });
+        videoList.addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting() && videoList.getSelectedIndex() >= 0) {
+                String val = videoList.getSelectedValue();
+                switchToCard(val, videoList, videoList.getSelectedIndex());
+                if (!val.equals(CARD_IMAGE_STUDIO)) imageList.clearSelection();
+                if (!val.equals(CARD_MODELS)) managementList.clearSelection();
             }
         });
         managementList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting() && managementList.getSelectedIndex() >= 0) {
-                workflowList.clearSelection();
+                videoList.clearSelection();
                 cardLayout.show(contentPanel, managementList.getSelectedValue());
             }
         });
 
         // Set initial selection after listeners are wired
-        workflowList.setSelectedIndex(0);
+        imageList.setSelectedIndex(0);
 
         JPanel sidebarPanel = new JPanel(new BorderLayout(0, 0));
         sidebarPanel.setPreferredSize(new Dimension(170, 0));
@@ -189,20 +213,35 @@ public class MainFrame extends JFrame {
         brand.setBorder(BorderFactory.createEmptyBorder(14, 20, 12, 20));
         sidebarPanel.add(brand, BorderLayout.NORTH);
 
-        // Workflow section
-        JPanel workflowSection = new JPanel();
-        workflowSection.setLayout(new BoxLayout(workflowSection, BoxLayout.Y_AXIS));
-        workflowSection.setOpaque(false);
-        workflowSection.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
+        // Image section
+        JPanel imageSection = new JPanel();
+        imageSection.setLayout(new BoxLayout(imageSection, BoxLayout.Y_AXIS));
+        imageSection.setOpaque(false);
+        imageSection.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
 
-        JLabel workflowHeader = new JLabel("WORKSPACE");
-        workflowHeader.setFont(workflowHeader.getFont().deriveFont(Font.BOLD, 10f));
-        workflowHeader.setForeground(UIManager.getColor("Label.disabledForeground"));
-        workflowHeader.setBorder(BorderFactory.createEmptyBorder(4, 20, 4, 20));
-        workflowHeader.setAlignmentX(Component.LEFT_ALIGNMENT);
-        workflowSection.add(workflowHeader);
-        workflowList.setAlignmentX(Component.LEFT_ALIGNMENT);
-        workflowSection.add(workflowList);
+        JLabel imageHeader = new JLabel("IMAGE");
+        imageHeader.setFont(imageHeader.getFont().deriveFont(Font.BOLD, 10f));
+        imageHeader.setForeground(UIManager.getColor("Label.disabledForeground"));
+        imageHeader.setBorder(BorderFactory.createEmptyBorder(4, 20, 4, 20));
+        imageHeader.setAlignmentX(Component.LEFT_ALIGNMENT);
+        imageSection.add(imageHeader);
+        imageList.setAlignmentX(Component.LEFT_ALIGNMENT);
+        imageSection.add(imageList);
+
+        // Video section
+        JPanel videoSection = new JPanel();
+        videoSection.setLayout(new BoxLayout(videoSection, BoxLayout.Y_AXIS));
+        videoSection.setOpaque(false);
+        videoSection.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
+
+        JLabel videoHeader = new JLabel("VIDEO");
+        videoHeader.setFont(videoHeader.getFont().deriveFont(Font.BOLD, 10f));
+        videoHeader.setForeground(UIManager.getColor("Label.disabledForeground"));
+        videoHeader.setBorder(BorderFactory.createEmptyBorder(8, 20, 4, 20));
+        videoHeader.setAlignmentX(Component.LEFT_ALIGNMENT);
+        videoSection.add(videoHeader);
+        videoList.setAlignmentX(Component.LEFT_ALIGNMENT);
+        videoSection.add(videoList);
 
         // Management section
         JPanel managementSection = new JPanel();
@@ -218,8 +257,6 @@ public class MainFrame extends JFrame {
         managementList.setAlignmentX(Component.LEFT_ALIGNMENT);
         managementSection.add(managementList);
 
-        // Diagnostics section removed
-
         // Bottom panel: management
         JPanel bottomSection = new JPanel();
         bottomSection.setLayout(new BoxLayout(bottomSection, BoxLayout.Y_AXIS));
@@ -230,7 +267,12 @@ public class MainFrame extends JFrame {
         // Combine: workflow on top, management at bottom
         JPanel sidebarContent = new JPanel(new BorderLayout());
         sidebarContent.setOpaque(false);
-        sidebarContent.add(workflowSection, BorderLayout.NORTH);
+        JPanel topSections = new JPanel();
+        topSections.setLayout(new BoxLayout(topSections, BoxLayout.Y_AXIS));
+        topSections.setOpaque(false);
+        topSections.add(imageSection);
+        topSections.add(videoSection);
+        sidebarContent.add(topSections, BorderLayout.NORTH);
         sidebarContent.add(bottomSection, BorderLayout.SOUTH);
 
         sidebarPanel.add(sidebarContent, BorderLayout.CENTER);
@@ -254,7 +296,7 @@ public class MainFrame extends JFrame {
         setJMenuBar(buildMenuBar());
 
         /* Select first card */
-        cardLayout.show(contentPanel, CARD_GENERATE);
+        cardLayout.show(contentPanel, CARD_IMAGE_STUDIO);
     }
 
     /* ================================================================== */
@@ -281,18 +323,32 @@ public class MainFrame extends JFrame {
 
         JMenuItem showGenerate = new JMenuItem("Generate");
         showGenerate.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_1, menuMask));
-        showGenerate.addActionListener(e -> switchToCard(CARD_GENERATE, workflowList, 0));
+        showGenerate.addActionListener(e -> {
+            imageStudioPanel.selectTab(0);
+            switchToCard(CARD_IMAGE_STUDIO, imageList, 0);
+        });
         viewMenu.add(showGenerate);
 
         JMenuItem showImg2Img = new JMenuItem("Img2Img");
         showImg2Img.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_2, menuMask));
-        showImg2Img.addActionListener(e -> switchToCard(CARD_IMG2IMG, workflowList, 1));
+        showImg2Img.addActionListener(e -> {
+            imageStudioPanel.selectTab(1);
+            switchToCard(CARD_IMAGE_STUDIO, imageList, 0);
+        });
         viewMenu.add(showImg2Img);
 
         JMenuItem showUpscale = new JMenuItem("Upscale");
         showUpscale.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_3, menuMask));
-        showUpscale.addActionListener(e -> switchToCard(CARD_UPSCALE, workflowList, 2));
+        showUpscale.addActionListener(e -> {
+            imageStudioPanel.selectTab(2);
+            switchToCard(CARD_IMAGE_STUDIO, imageList, 0);
+        });
         viewMenu.add(showUpscale);
+        
+        JMenuItem showVideo = new JMenuItem("Video");
+        showVideo.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_4, menuMask));
+        showVideo.addActionListener(e -> switchToCard("Video", videoList, 0));
+        viewMenu.add(showVideo);
 
         viewMenu.addSeparator();
 
@@ -333,7 +389,8 @@ public class MainFrame extends JFrame {
 
     private void switchToCard(String card, JList<String> targetList, int index) {
         cardLayout.show(contentPanel, card);
-        if (targetList != workflowList) workflowList.clearSelection();
+        if (targetList != imageList) imageList.clearSelection();
+        if (targetList != videoList) videoList.clearSelection();
         if (targetList != managementList) managementList.clearSelection();
         targetList.setSelectedIndex(index);
     }

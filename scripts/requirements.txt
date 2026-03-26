@@ -1,0 +1,14 @@
+# JForge Python converter dependencies
+# Install with:  pip install -r scripts/requirements.txt
+#
+# These versions are tested together. Pin them to avoid silent API breaks.
+
+torch>=2.1.0
+onnx>=1.15.0
+onnxruntime>=1.18.0
+diffusers>=0.27.0
+transformers>=4.40.0
+accelerate>=0.29.0
+optimum[exporters]>=1.19.0
+huggingface_hub>=0.22.0
+sentencepiece>=0.1.99

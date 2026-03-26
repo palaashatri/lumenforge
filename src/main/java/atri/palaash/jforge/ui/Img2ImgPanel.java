@@ -88,13 +88,13 @@ public class Img2ImgPanel extends JPanel {
     private final JTextField seedField;
     private final JTextField stepsField;
     private final JButton browseButton;
-    private final JButton generateButton;
+    private final JButton runButton;
     private final JButton cancelButton;
     private final JButton saveButton;
     private final JButton clearMaskButton;
     private final JToggleButton maskToggle;
     private final JLabel previewLabel;
-    private final JTextPane statusArea;
+    private final JTextPane logArea;
     private final JLabel statusLabel;
     private final JProgressBar progressBar;
     private final MaskCanvas maskCanvas;
@@ -161,14 +161,14 @@ public class Img2ImgPanel extends JPanel {
         browseButton = new JButton("Browse\u2026");
         browseButton.setToolTipText("Choose an input image");
 
-        generateButton = new JButton("Generate");
-        generateButton.setToolTipText("Run Img2Img transformation (\u2318Enter)");
+        runButton = new JButton("Generate");
+        runButton.setToolTipText("Run Img2Img transformation (\u2318Enter)");
 
         cancelButton = new JButton("Cancel");
         cancelButton.setEnabled(false);
         cancelButton.setToolTipText("Cancel the current generation (\u2318.)");
 
-        saveButton = new JButton("Save");
+        saveButton = new JButton("Save Result");
         saveButton.setEnabled(false);
         saveButton.setToolTipText("Save the result image (\u2318S)");
 
@@ -210,9 +210,9 @@ public class Img2ImgPanel extends JPanel {
         statusLabel = new JLabel("Ready");
         statusLabel.setFont(statusLabel.getFont().deriveFont(Font.PLAIN, 12f));
 
-        statusArea = new JTextPane();
-        statusArea.setEditable(false);
-        statusArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        logArea = new JTextPane();
+        logArea.setEditable(false);
+        logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
 
         progressBar = new JProgressBar();
         progressBar.setPreferredSize(new Dimension(0, 4));
@@ -245,10 +245,10 @@ public class Img2ImgPanel extends JPanel {
         available.forEach(modelCombo::addItem);
         if (selected != null) modelCombo.setSelectedItem(selected);
         if (modelCombo.getItemCount() == 0) {
-            generateButton.setEnabled(false);
+            runButton.setEnabled(false);
             statusLabel.setText("No models downloaded. Open Model Manager to download one.");
         } else {
-            if (!running) generateButton.setEnabled(true);
+            if (!running) runButton.setEnabled(true);
             statusLabel.setText("Ready");
         }
     }
@@ -314,42 +314,53 @@ public class Img2ImgPanel extends JPanel {
         top.add(Box.createVerticalStrut(12));
 
         /* Buttons row */
-        JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
-        btnRow.add(generateButton);
-        btnRow.add(cancelButton);
+        JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        saveButton.setPreferredSize(new Dimension(120, 32));
+        cancelButton.setPreferredSize(new Dimension(90, 32));
+        runButton.setPreferredSize(new Dimension(120, 32));
         btnRow.add(saveButton);
+        btnRow.add(cancelButton);
+        btnRow.add(runButton);
         btnRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
         top.add(btnRow);
 
-        /* Status */
-        statusLabel.setBorder(BorderFactory.createEmptyBorder(6, 20, 8, 20));
+        /* Status & Progress */
         top.add(Box.createVerticalStrut(4));
         top.add(progressBar);
-        top.add(statusLabel);
 
-        /* Bottom — preview / mask canvas + status/log */
-        JPanel bottom = new JPanel(new GridLayout(1, 2, 8, 0));
+        /* Bottom — preview + log via Tabs */
+        JPanel bottom = new JPanel(new BorderLayout());
         bottom.setBorder(BorderFactory.createEmptyBorder(0, 24, 4, 24));
 
-        JPanel previewCard = new JPanel(new BorderLayout());
+        javax.swing.JTabbedPane tabs = new javax.swing.JTabbedPane();
+
+        JPanel previewCard = new JPanel(new GridLayout(1, 2, 8, 0));
         previewCard.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
-        previewCard.add(maskCanvas, BorderLayout.CENTER);
-        bottom.add(previewCard);
+        previewCard.add(borderedPreview("Mask / Input", maskCanvas));
+        previewCard.add(borderedPreview("Result", previewLabel));
 
-        JPanel resultCard = new JPanel(new BorderLayout());
-        resultCard.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
-        resultCard.add(previewLabel, BorderLayout.CENTER);
-        bottom.add(resultCard);
+        tabs.addTab("Output Preview", new JScrollPane(previewCard));
+        tabs.addTab("Generation Log", new JScrollPane(logArea));
+        
+        bottom.add(tabs, BorderLayout.CENTER);
 
-        JPanel logPanel = new JPanel(new BorderLayout());
-        JScrollPane logScroll = new JScrollPane(statusArea);
-        logScroll.setPreferredSize(new Dimension(0, 80));
-        logPanel.add(logScroll, BorderLayout.CENTER);
-        logPanel.setBorder(BorderFactory.createEmptyBorder(4, 24, 12, 24));
+        JPanel statusContainer = new JPanel(new BorderLayout());
+        statusLabel.setBorder(BorderFactory.createEmptyBorder(6, 20, 8, 20));
+        statusContainer.add(statusLabel, BorderLayout.WEST);
 
         add(top, BorderLayout.NORTH);
         add(bottom, BorderLayout.CENTER);
-        add(logPanel, BorderLayout.SOUTH);
+        add(statusContainer, BorderLayout.SOUTH);
+    }
+
+    private static JPanel borderedPreview(String title, java.awt.Component comp) {
+        JPanel p = new JPanel(new BorderLayout(0, 4));
+        JLabel t = new JLabel(title, JLabel.CENTER);
+        t.setFont(t.getFont().deriveFont(Font.PLAIN, 11f));
+        t.setForeground(new Color(130, 130, 130));
+        p.add(t, BorderLayout.NORTH);
+        p.add(new JScrollPane(comp), BorderLayout.CENTER);
+        return p;
     }
 
     /* ================================================================== */
@@ -358,7 +369,7 @@ public class Img2ImgPanel extends JPanel {
 
     private void wireActions() {
         browseButton.addActionListener(e -> browseImage());
-        generateButton.addActionListener(e -> generate());
+        runButton.addActionListener(e -> generate());
         cancelButton.addActionListener(e -> cancelInference());
         saveButton.addActionListener(e -> saveResult());
     }
@@ -523,7 +534,7 @@ public class Img2ImgPanel extends JPanel {
 
     private void setRunning(boolean r) {
         running = r;
-        generateButton.setEnabled(!r);
+        runButton.setEnabled(!r);
         cancelButton.setEnabled(r);
         browseButton.setEnabled(!r);
         modelCombo.setEnabled(!r);
@@ -589,9 +600,9 @@ public class Img2ImgPanel extends JPanel {
 
     private void appendLog(String msg) {
         try {
-            var doc = statusArea.getDocument();
+            var doc = logArea.getDocument();
             doc.insertString(doc.getLength(), msg + "\n", null);
-            statusArea.setCaretPosition(doc.getLength());
+            logArea.setCaretPosition(doc.getLength());
         } catch (Exception ignored) {}
     }
 
