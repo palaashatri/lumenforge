@@ -10,7 +10,7 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.release>21</maven.compiler.release>
+        <maven.compiler.release>25</maven.compiler.release>
         <!-- Overridden to onnxruntime_gpu on Windows / Linux via profiles -->
         <ort.artifactId>onnxruntime</ort.artifactId>
         <ort.version>1.22.0</ort.version>

@@ -60,6 +60,7 @@ public class MainFrame extends JFrame {
     private final JPanel contentPanel = new JPanel(cardLayout);
 
     private final TextToImagePanel textToImagePanel;
+    private final TextToVideoPanel textToVideoPanel;
     private final ImageUpscalePanel imageUpscalePanel;
     private final Img2ImgPanel img2ImgPanel;
     private final ModelManagerPanel modelManagerPanel;
@@ -96,6 +97,7 @@ public class MainFrame extends JFrame {
 
         textToImagePanel = new TextToImagePanel(
                 t2iModels, downloader, services.get(TaskType.TEXT_TO_IMAGE));
+        textToVideoPanel = new TextToVideoPanel(services.get(TaskType.TEXT_TO_VIDEO), storage, downloader);
         imageUpscalePanel = new ImageUpscalePanel(
                 upscaleModels, downloader, services.get(TaskType.IMAGE_UPSCALE));
         img2ImgPanel = new Img2ImgPanel(
@@ -139,13 +141,14 @@ public class MainFrame extends JFrame {
 
         /* ── Content cards ─────────────────────────────────────── */
         contentPanel.add(textToImagePanel, CARD_GENERATE);
+        contentPanel.add(textToVideoPanel, "Video");
         contentPanel.add(img2ImgPanel,     CARD_IMG2IMG);
         contentPanel.add(imageUpscalePanel, CARD_UPSCALE);
         contentPanel.add(modelManagerPanel, CARD_MODELS);
 
         /* ── Sidebar ─────────────────────────────────────────────── */
         // Create both lists first, then wire listeners
-        String[] workflowItems = {CARD_GENERATE, CARD_IMG2IMG, CARD_UPSCALE};
+        String[] workflowItems = {CARD_GENERATE, "Video", CARD_IMG2IMG, CARD_UPSCALE};
         workflowList = new JList<>(workflowItems);
         workflowList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         workflowList.setFixedCellHeight(32);

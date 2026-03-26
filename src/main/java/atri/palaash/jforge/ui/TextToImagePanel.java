@@ -3,6 +3,7 @@ package atri.palaash.jforge.ui;
 import atri.palaash.jforge.inference.InferenceRequest;
 import atri.palaash.jforge.inference.InferenceResult;
 import atri.palaash.jforge.inference.InferenceService;
+import atri.palaash.jforge.inference.PromptEnhancer;
 import atri.palaash.jforge.model.ModelDescriptor;
 import atri.palaash.jforge.storage.ModelDownloader;
 
@@ -385,8 +386,8 @@ public class TextToImagePanel extends JPanel {
             SwingUtilities.invokeLater(() -> setRunning(true, "Generating image\u2026"));
             return inferenceService.run(new InferenceRequest(
                     selectedModel,
-                    prompt,
-                    negativePromptField.getText().trim(),
+                    PromptEnhancer.enhanceOriginal(prompt),
+                    PromptEnhancer.enhanceNegative(negativePromptField.getText().trim()),
                     1.0,
                     ((Number) seedSpinner.getValue()).longValue(),
                     ((Number) stepsSpinner.getValue()).intValue(),

@@ -539,13 +539,14 @@ public class GenericOnnxService implements InferenceService {
         int ch = latents[0].length, h = latents[0][0].length, w = latents[0][0][0].length;
         float[][][][] out = new float[1][ch][h][w];
         float dt = sigmaPrev - sigma;
-        for (int c = 0; c < ch; c++) {
+        
+        java.util.stream.IntStream.range(0, ch).parallel().forEach(c -> {
             for (int y = 0; y < h; y++) {
                 for (int x = 0; x < w; x++) {
                     out[0][c][y][x] = latents[0][c][y][x] + dt * noisePred[c][y][x];
                 }
             }
-        }
+        });
         return out;
     }
 
@@ -2300,14 +2301,16 @@ public class GenericOnnxService implements InferenceService {
     }
 
     private float[][][][] scaleLatents(float[][][][] latents, float scale) {
-        float[][][][] out = new float[1][latents[0].length][latents[0][0].length][latents[0][0][0].length];
-        for (int c = 0; c < latents[0].length; c++) {
-            for (int y = 0; y < latents[0][0].length; y++) {
-                for (int x = 0; x < latents[0][0][0].length; x++) {
+        int ch = latents[0].length, h = latents[0][0].length, w = latents[0][0][0].length;
+        float[][][][] out = new float[1][ch][h][w];
+        
+        java.util.stream.IntStream.range(0, ch).parallel().forEach(c -> {
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
                     out[0][c][y][x] = latents[0][c][y][x] * scale;
                 }
             }
-        }
+        });
         return out;
     }
 

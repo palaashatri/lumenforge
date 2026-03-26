@@ -3,6 +3,7 @@ package atri.palaash.jforge.ui;
 import atri.palaash.jforge.inference.InferenceRequest;
 import atri.palaash.jforge.inference.InferenceResult;
 import atri.palaash.jforge.inference.InferenceService;
+import atri.palaash.jforge.inference.PromptEnhancer;
 import atri.palaash.jforge.model.ModelDescriptor;
 import atri.palaash.jforge.storage.ModelDownloader;
 
@@ -438,7 +439,9 @@ public class Img2ImgPanel extends JPanel {
         cancellationFlag = new AtomicBoolean(false);
 
         CompletableFuture<InferenceResult> future = inferenceService.run(new InferenceRequest(
-                model, promptField.getText().trim(), "",
+                model, 
+                PromptEnhancer.enhanceOriginal(promptField.getText().trim()), 
+                PromptEnhancer.enhanceNegative(""),
                 7.5, seed, steps, w, h, "img2img", false,
                 inputImageFile.getAbsolutePath(), gpuSupplier.getAsBoolean(),
                 msg -> SwingUtilities.invokeLater(() -> {

@@ -19,6 +19,9 @@ public class ServiceFactory {
     }
 
     public InferenceService create(TaskType taskType) {
+        if (taskType == TaskType.TEXT_TO_VIDEO) {
+            return new LocalVideoOnnxService(storage, executor);
+        }
         if (registry.byTask(taskType).isEmpty()) {
             return request -> java.util.concurrent.CompletableFuture.completedFuture(
                     InferenceResult.fail("No models registered for this task."));
