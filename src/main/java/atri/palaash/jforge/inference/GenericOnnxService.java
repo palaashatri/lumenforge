@@ -9,6 +9,7 @@ import ai.onnxruntime.TensorInfo;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import atri.palaash.jforge.model.TaskType;
+import atri.palaash.jforge.runtime.SessionManager;
 import atri.palaash.jforge.storage.ModelStorage;
 
 import javax.imageio.ImageIO;
@@ -51,21 +52,7 @@ public class GenericOnnxService implements InferenceService {
      * evicts the oldest session when this limit is reached.
      */
     private static final int MAX_CACHED_SESSIONS = 5;
-    private static final java.util.LinkedHashMap<String, OrtSession> SESSION_CACHE =
-            new java.util.LinkedHashMap<>(16, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, OrtSession> eldest) {
-                    if (size() > MAX_CACHED_SESSIONS) {
-                        try {
-                            System.out.println("[JForge] Evicting cached session (LRU): "
-                                    + Path.of(eldest.getKey()).getFileName());
-                            eldest.getValue().close();
-                        } catch (Exception ignored) { }
-                        return true;
-                    }
-                    return false;
-                }
-            };
+    private static final SessionManager SESSION_MANAGER = new SessionManager(MAX_CACHED_SESSIONS);
     private static final ConcurrentHashMap<String, ClipTokenizer> TOKENIZER_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, T5Tokenizer> T5_TOKENIZER_CACHE = new ConcurrentHashMap<>();
     private static volatile String cachedEpKey = "";
@@ -89,15 +76,8 @@ public class GenericOnnxService implements InferenceService {
      */
     private synchronized OrtSession getOrCreateSession(OrtEnvironment env, Path modelPath,
                                            OrtSession.SessionOptions opts) throws OrtException {
-        String key = modelPath.toAbsolutePath().toString();
-        OrtSession existing = SESSION_CACHE.get(key);
-        if (existing != null) {
-            System.out.println("[JForge] Session cache hit: " + modelPath.getFileName());
-            return existing;
-        }
         System.out.println("[JForge] Loading ONNX session: " + modelPath.getFileName());
-        OrtSession session = env.createSession(modelPath.toString(), opts);
-        SESSION_CACHE.put(key, session);
+        OrtSession session = SESSION_MANAGER.getSession(env, modelPath, opts);
         System.out.println("[JForge] Session loaded: " + modelPath.getFileName());
         return session;
     }
@@ -108,14 +88,8 @@ public class GenericOnnxService implements InferenceService {
      * where text encoders are only needed temporarily.
      */
     private synchronized void evictSession(Path modelPath) {
-        String key = modelPath.toAbsolutePath().toString();
-        OrtSession session = SESSION_CACHE.remove(key);
-        if (session != null) {
-            try {
-                session.close();
-                System.out.println("[JForge] Evicted session: " + modelPath.getFileName());
-            } catch (Exception ignored) { }
-        }
+        SESSION_MANAGER.evictSession(modelPath);
+        System.out.println("[JForge] Evicted session: " + modelPath.getFileName());
     }
 
     /**
@@ -153,10 +127,7 @@ public class GenericOnnxService implements InferenceService {
      * tokenizer cache.
      */
     public static synchronized void clearCache() {
-        SESSION_CACHE.forEach((k, session) -> {
-            try { session.close(); } catch (Exception ignored) { }
-        });
-        SESSION_CACHE.clear();
+        SESSION_MANAGER.clearCache();
         TOKENIZER_CACHE.clear();
         T5_TOKENIZER_CACHE.clear();
         cachedEpKey = "";

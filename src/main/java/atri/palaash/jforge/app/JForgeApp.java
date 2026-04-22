@@ -4,6 +4,7 @@ import atri.palaash.jforge.inference.InferenceService;
 import atri.palaash.jforge.inference.ServiceFactory;
 import atri.palaash.jforge.model.ModelRegistry;
 import atri.palaash.jforge.model.TaskType;
+import atri.palaash.jforge.models.ForgeModelRegistry;
 import atri.palaash.jforge.storage.ModelDownloader;
 import atri.palaash.jforge.storage.ModelStorage;
 import atri.palaash.jforge.ui.MainFrame;
@@ -30,6 +31,9 @@ public class JForgeApp {
         ExecutorService workerPool = Executors.newVirtualThreadPerTaskExecutor();
         ModelStorage storage = new ModelStorage();
         ModelRegistry registry = new ModelRegistry();
+        ForgeModelRegistry forgeModelRegistry = new ForgeModelRegistry(registry, storage);
+        System.out.println("[JForge] Forge model registry initialized with "
+            + forgeModelRegistry.allModels().size() + " models");
         HttpClient httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(20))
                 .followRedirects(HttpClient.Redirect.NORMAL)

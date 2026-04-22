@@ -16,6 +16,14 @@
         <ort.version>1.22.0</ort.version>
         <!-- Classifier appended to the shaded JAR name (overridden by CI) -->
         <jar.classifier></jar.classifier>
+
+        <!-- Logical module layout directories (tracked explicitly per GEMINI spec). -->
+        <jforge.module.core.dir>${project.basedir}/core</jforge.module.core.dir>
+        <jforge.module.ui.dir>${project.basedir}/ui</jforge.module.ui.dir>
+        <jforge.module.models.dir>${project.basedir}/models</jforge.module.models.dir>
+        <jforge.module.tasks.dir>${project.basedir}/tasks</jforge.module.tasks.dir>
+        <jforge.module.runtime.dir>${project.basedir}/runtime</jforge.module.runtime.dir>
+        <jforge.module.assets.dir>${project.basedir}/assets</jforge.module.assets.dir>
     </properties>
 
     <dependencies>
@@ -110,6 +118,34 @@
                 <configuration>
                     <useModulePath>false</useModulePath>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <id>verify-logical-module-layout</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireFilesExist>
+                                    <files>
+                                        <file>${jforge.module.core.dir}/README.md</file>
+                                        <file>${jforge.module.ui.dir}/README.md</file>
+                                        <file>${jforge.module.models.dir}/README.md</file>
+                                        <file>${jforge.module.tasks.dir}/README.md</file>
+                                        <file>${jforge.module.runtime.dir}/README.md</file>
+                                        <file>${jforge.module.assets.dir}/README.md</file>
+                                    </files>
+                                </requireFilesExist>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

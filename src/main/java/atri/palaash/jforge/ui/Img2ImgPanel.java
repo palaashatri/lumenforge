@@ -232,6 +232,21 @@ public class Img2ImgPanel extends JPanel {
 
     public void setOpenModelManager(Runnable callback) { this.openModelManager = callback; }
 
+    public void setMaskMode(boolean enabled) {
+        maskToggle.setSelected(enabled);
+        maskMode = enabled;
+        maskCanvas.setMaskMode(enabled);
+        if (enabled && maskImage == null && inputImage != null) {
+            maskImage = new BufferedImage(inputImage.getWidth(), inputImage.getHeight(),
+                    BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = maskImage.createGraphics();
+            g.setColor(Color.BLACK);
+            g.fillRect(0, 0, maskImage.getWidth(), maskImage.getHeight());
+            g.dispose();
+        }
+        maskCanvas.repaint();
+    }
+
     public void updateModels(List<ModelDescriptor> models) {
         List<ModelDescriptor> available = models;
         if (modelStorage != null) {

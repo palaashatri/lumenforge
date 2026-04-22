@@ -32,6 +32,8 @@ Desktop Java Swing application for ONNX Runtime inference with intelligent GPU a
 - **PyTorch → ONNX auto-conversion**: downloading a PyTorch model triggers automatic conversion via managed Python venv
 - Manual ONNX model import
 - Gated model support with HuggingFace token authentication
+- Model metadata ingestion with version and tags (`model.json` when present)
+- Pre-run model compatibility checks for scheduler/sampler constraints
 - Local model storage in `~/.jforge-models`
 
 ### GPU Acceleration
@@ -46,10 +48,20 @@ Intelligent execution provider selection — JForge probes available EPs at runt
 Override with `-Djforge.ep=cuda` (or any EP key) to force a specific provider.
 
 ### UI
+- Top task tabs for Text -> Image, Image -> Image, Inpaint, Upscale, Settings, and Models
+- Bottom thumbnail history strip with click-to-inspect metadata and right-click open folder
+- Per-output metadata JSON sidecars written alongside generated images
 - Native look-and-feel: system-native on macOS, FlatLaf with dark/light detection on Windows/Linux
 - High-performance async execution using virtual threads
 - Per-step progress with timing and ETA
 - Session and tokenizer caching for fast repeated inference
+
+### Architecture (In Progress)
+- `core`: scheduler, sampler, per-step callback, tensor abstractions
+- `tasks`: unified `ForgeTask` API and task implementations
+- `models`: `ForgeModel`, model typing, metadata and compatibility checks
+- `runtime`: `SessionManager` for ONNX Runtime session caching and device information
+- `ui`: tabbed workflow shell plus generation history strip
 
 ## Downloads
 
@@ -94,6 +106,25 @@ mvn clean compile exec:java
 ```bash
 mvn clean test
 ```
+
+## Packaging
+
+Cross-platform packaging scripts are available in `scripts/`:
+
+```bash
+# macOS .app bundle
+./scripts/package-macos-app.sh 1.0.0
+
+# Linux app-image (and optional AppImage if appimagetool is installed)
+./scripts/package-linux-appimage.sh 1.0.0
+```
+
+```powershell
+# Windows .exe (PowerShell)
+./scripts/package-windows-exe.ps1 -Version 1.0.0
+```
+
+All scripts use `jpackage` and expect the shaded jar to exist in `target/`.
 
 ## CI / CD
 
