@@ -1,185 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>atri.palaash.jforge</groupId>
-    <artifactId>jforge</artifactId>
+    <artifactId>jforge-parent</artifactId>
     <version>1.0.0-SNAPSHOT</version>
-    <name>JForge</name>
+    <packaging>pom</packaging>
+    <name>JForge (Parent)</name>
+
+    <modules>
+        <module>core</module>
+        <module>runtime</module>
+        <module>models</module>
+        <module>tasks</module>
+        <module>ui</module>
+        <module>app</module>
+    </modules>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>21</maven.compiler.release>
-        <!-- Overridden to onnxruntime_gpu on Windows / Linux via profiles -->
         <ort.artifactId>onnxruntime</ort.artifactId>
         <ort.version>1.22.0</ort.version>
-        <!-- Classifier appended to the shaded JAR name (overridden by CI) -->
-        <jar.classifier></jar.classifier>
-
-        <!-- Logical module layout directories (tracked explicitly per GEMINI spec). -->
-        <jforge.module.core.dir>${project.basedir}/core</jforge.module.core.dir>
-        <jforge.module.ui.dir>${project.basedir}/ui</jforge.module.ui.dir>
-        <jforge.module.models.dir>${project.basedir}/models</jforge.module.models.dir>
-        <jforge.module.tasks.dir>${project.basedir}/tasks</jforge.module.tasks.dir>
-        <jforge.module.runtime.dir>${project.basedir}/runtime</jforge.module.runtime.dir>
-        <jforge.module.assets.dir>${project.basedir}/assets</jforge.module.assets.dir>
+        <jackson.version>2.18.3</jackson.version>
+        <flatlaf.version>3.5.4</flatlaf.version>
+        <junit.version>5.11.4</junit.version>
     </properties>
 
-    <dependencies>
-        <dependency>
-            <groupId>com.microsoft.onnxruntime</groupId>
-            <artifactId>${ort.artifactId}</artifactId>
-            <version>${ort.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.formdev</groupId>
-            <artifactId>flatlaf</artifactId>
-            <version>3.5.4</version>
-        </dependency>
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter</artifactId>
-            <version>5.11.4</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-            <version>2.18.3</version>
-        </dependency>
-    </dependencies>
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>atri.palaash.jforge</groupId>
+                <artifactId>jforge-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>atri.palaash.jforge</groupId>
+                <artifactId>jforge-runtime</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>atri.palaash.jforge</groupId>
+                <artifactId>jforge-models</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>atri.palaash.jforge</groupId>
+                <artifactId>jforge-tasks</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>atri.palaash.jforge</groupId>
+                <artifactId>jforge-ui</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.microsoft.onnxruntime</groupId>
+                <artifactId>${ort.artifactId}</artifactId>
+                <version>${ort.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.formdev</groupId>
+                <artifactId>flatlaf</artifactId>
+                <version>${flatlaf.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter</artifactId>
+                <version>${junit.version}</version>
+                <scope>test</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.13.0</version>
-                <configuration>
-                    <release>${maven.compiler.release}</release>
-                </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-jar-plugin</artifactId>
-                <version>3.4.2</version>
-                <configuration>
-                    <archive>
-                        <manifest>
-                            <mainClass>atri.palaash.jforge.app.JForgeApp</mainClass>
-                        </manifest>
-                    </archive>
-                </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.6.0</version>
-                <executions>
-                    <execution>
-                        <phase>package</phase>
-                        <goals><goal>shade</goal></goals>
-                        <configuration>
-                            <createDependencyReducedPom>false</createDependencyReducedPom>
-                            <finalName>${project.artifactId}-${project.version}${jar.classifier}</finalName>
-                            <transformers>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>atri.palaash.jforge.app.JForgeApp</mainClass>
-                                </transformer>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-                            </transformers>
-                            <filters>
-                                <filter>
-                                    <artifact>*:*</artifact>
-                                    <excludes>
-                                        <exclude>META-INF/*.SF</exclude>
-                                        <exclude>META-INF/*.DSA</exclude>
-                                        <exclude>META-INF/*.RSA</exclude>
-                                    </excludes>
-                                </filter>
-                            </filters>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-            <plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>exec-maven-plugin</artifactId>
-                <version>3.5.0</version>
-                <configuration>
-                    <mainClass>atri.palaash.jforge.app.JForgeApp</mainClass>
-                </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.5.2</version>
-                <configuration>
-                    <useModulePath>false</useModulePath>
-                </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-enforcer-plugin</artifactId>
-                <version>3.5.0</version>
-                <executions>
-                    <execution>
-                        <id>verify-logical-module-layout</id>
-                        <phase>validate</phase>
-                        <goals>
-                            <goal>enforce</goal>
-                        </goals>
-                        <configuration>
-                            <rules>
-                                <requireFilesExist>
-                                    <files>
-                                        <file>${jforge.module.core.dir}/README.md</file>
-                                        <file>${jforge.module.ui.dir}/README.md</file>
-                                        <file>${jforge.module.models.dir}/README.md</file>
-                                        <file>${jforge.module.tasks.dir}/README.md</file>
-                                        <file>${jforge.module.runtime.dir}/README.md</file>
-                                        <file>${jforge.module.assets.dir}/README.md</file>
-                                    </files>
-                                </requireFilesExist>
-                            </rules>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-        </plugins>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.13.0</version>
+                    <configuration>
+                        <release>${maven.compiler.release}</release>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
     </build>
 
     <profiles>
-        <!--
-          GPU profiles: auto-activate on Windows / Linux so the fat JAR
-          ships with the CUDA execution provider.  On macOS the default
-          onnxruntime (CPU + CoreML) is used instead.
-
-          To force a CPU-only build on Windows/Linux:
-              mvn package -Dort.artifactId=onnxruntime
-        -->
         <profile>
             <id>gpu-windows</id>
-            <activation>
-                <os><family>Windows</family></os>
-            </activation>
-            <properties>
-                <ort.artifactId>onnxruntime_gpu</ort.artifactId>
-            </properties>
+            <activation><os><family>Windows</family></os></activation>
+            <properties><ort.artifactId>onnxruntime_gpu</ort.artifactId></properties>
         </profile>
         <profile>
             <id>gpu-linux</id>
-            <activation>
-                <os>
-                    <family>unix</family>
-                    <name>Linux</name>
-                </os>
-            </activation>
-            <properties>
-                <ort.artifactId>onnxruntime_gpu</ort.artifactId>
-            </properties>
+            <activation><os><family>unix</family><name>Linux</name></os></activation>
+            <properties><ort.artifactId>onnxruntime_gpu</ort.artifactId></properties>
         </profile>
-
     </profiles>
 </project>

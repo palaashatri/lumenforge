@@ -56,12 +56,15 @@ Override with `-Djforge.ep=cuda` (or any EP key) to force a specific provider.
 - Per-step progress with timing and ETA
 - Session and tokenizer caching for fast repeated inference
 
-### Architecture (In Progress)
-- `core`: scheduler, sampler, per-step callback, tensor abstractions
-- `tasks`: unified `ForgeTask` API and task implementations
-- `models`: `ForgeModel`, model typing, metadata and compatibility checks
-- `runtime`: `SessionManager` for ONNX Runtime session caching and device information
-- `ui`: tabbed workflow shell plus generation history strip
+### Architecture (Multi-Module)
+- `jforge-parent`: Root Maven project managing shared dependencies and profiles.
+- `jforge-core`: Denoising engine, schedulers, samplers, and model registry.
+- `jforge-runtime`: Session management, MemoryGuard, and execution provider selection.
+- `jforge-models`: Model discovery, metadata, and compatibility logic.
+- `jforge-tasks`: Unified `ForgeTask` API (Txt2Img, Img2Img, Inpaint, Upscale).
+- `jforge-ui`: Swing-based DiffusionBee-style interface and history gallery.
+- `jforge-app`: Main entry point and executable shaded JAR launcher.
+- `assets`: Repository-native icon and theme assets.
 
 ## Downloads
 

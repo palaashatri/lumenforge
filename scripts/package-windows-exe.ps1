@@ -11,7 +11,7 @@ $RuntimeImage = $env:JFORGE_RUNTIME_IMAGE
 
 Push-Location $RootDir
 
-if (-not (Test-Path "target/jforge-1.0.0-SNAPSHOT.jar")) {
+if (-not (Test-Path "app/target/jforge-app-1.0.0-SNAPSHOT.jar")) {
     mvn clean -DskipTests package
 }
 
@@ -21,8 +21,8 @@ $jpackageArgs = @(
   "--type", "exe",
   "--name", "JForge",
   "--dest", $DistDir,
-  "--input", "target",
-  "--main-jar", "jforge-1.0.0-SNAPSHOT.jar",
+  "--input", "app/target",
+  "--main-jar", "jforge-app-1.0.0-SNAPSHOT.jar",
   "--main-class", $MainClass,
   "--app-version", $Version,
   "--vendor", "JForge",

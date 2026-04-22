@@ -10,7 +10,7 @@ ICON_PATH="$ROOT_DIR/assets/icons/jforge.png"
 
 pushd "$ROOT_DIR" >/dev/null
 
-if [[ ! -f target/jforge-1.0.0-SNAPSHOT.jar ]]; then
+if [[ ! -f app/target/jforge-app-1.0.0-SNAPSHOT.jar ]]; then
   mvn clean -DskipTests package
 fi
 
@@ -20,8 +20,8 @@ JPACKAGE_ARGS=(
   --type app-image
   --name "$APP_NAME"
   --dest "$DIST_DIR"
-  --input target
-  --main-jar jforge-1.0.0-SNAPSHOT.jar
+  --input app/target
+  --main-jar jforge-app-1.0.0-SNAPSHOT.jar
   --main-class "$MAIN_CLASS"
   --app-version "$APP_VERSION"
   --vendor "JForge"
